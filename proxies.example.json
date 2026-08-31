@@ -1,0 +1,14 @@
+[
+  {
+    "name": "PE · Peru",
+    "server": "socks5://USER:PASS@HOST:PORT",
+    "username": "",
+    "password": ""
+  },
+  {
+    "name": "BR · Brazil",
+    "server": "socks5://HOST:PORT",
+    "username": "USER",
+    "password": "PASS"
+  }
+]

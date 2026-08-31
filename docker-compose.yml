@@ -1,0 +1,15 @@
+services:
+  bot:
+    build: .
+    image: pwascannerbot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # live-browser web control — must match WEBCONTROL_PORT / PUBLIC_URL in .env
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./proxies.json:/app/proxies.json:ro
+    # Chrome is memory-hungry; one collecting session ≈ 0.7–1 GB.
+    shm_size: "1gb"
+    mem_limit: "3g"
