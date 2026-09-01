@@ -228,10 +228,15 @@ class SessionManager:
                 return "гео/трек-параметры под оффер"
 
             def _load_past_cloaker():
-                """Load url, retrying on a decoy response — the cloaker verdict
-                is not stable, a reload often gets through."""
-                last_title = ""
-                for attempt in range(1, 4):
+                """Load url, retrying while the cloaker serves a non-funnel page.
+                The verdict is not stable — a reload often gets the real funnel.
+
+                A real PWA offer funnel always ships a web app manifest. The
+                cloaker's safe pages (empty 'App Market' shell, or a full
+                white-label 'review' site with Google Play links) never do —
+                so 'no manifest' is the reliable decoy tell here."""
+                last_title = last_kind = ""
+                for attempt in range(1, 6):
                     if attempt > 1:
                         try:
                             driver.delete_all_cookies()
@@ -261,10 +266,6 @@ class SessionManager:
                         raise RuntimeError("сайт не открылся через прокси")
                     body_txt = driver.execute_script(
                         "return document.body?document.body.innerText:''") or ""
-                    blocked = (
-                        self._looks_blocked(title, src)
-                        or self._looks_blocked(title, body_txt)
-                    )
 
                     manifest, murl = {}, None
                     try:
@@ -279,18 +280,24 @@ class SessionManager:
                     except Exception:
                         pass
 
-                    decoy = blocked or (
-                        not manifest and len(body_txt.strip()) < 20
-                    )
-                    if not decoy:
+                    if manifest and not self._looks_blocked(title, body_txt):
                         return cur, title, manifest, murl
+
+                    has_store = bool(re.search(
+                        r"play\.google\.com/store|apps\.apple\.com", src))
+                    if len(body_txt.strip()) < 20:
+                        last_kind = "пустая заглушка"
+                    elif has_store:
+                        last_kind = "белая страница (сайт-заглушка для модерации)"
+                    else:
+                        last_kind = "не воронка (нет manifest)"
                     log.info(
-                        "offer-link scan: decoy on attempt %d (title=%r) — retrying",
-                        attempt, title,
+                        "offer-link scan: decoy on attempt %d — %s (title=%r) — retry",
+                        attempt, last_kind, title,
                     )
                 raise RuntimeError(
-                    f"воронка вернула пустую страницу — декой клоаки "
-                    f"({_dc_hint()}); title={last_title!r}"
+                    f"клоака {attempt} раз(а) отдала {last_kind} вместо воронки "
+                    f"({_dc_hint()}); последний title={last_title!r}"
                 )
 
             def work():
