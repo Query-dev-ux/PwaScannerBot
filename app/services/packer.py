@@ -28,6 +28,19 @@ def build_pack(row, pushes, sessions_dir: str) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     plist = [dict(p) for p in pushes]
+    # backfill title/body/icon/url for rows stored before the payload parser
+    for p in plist:
+        if (p.get("service") or "") == "stage":
+            continue
+        if not (p.get("title") or p.get("body")) and p.get("raw"):
+            try:
+                from app.utils import extract_push_fields
+
+                ev = json.loads(p["raw"])
+                f = extract_push_fields(ev)
+                p.update({k: v for k, v in f.items() if v})
+            except Exception:
+                pass
     real = [p for p in plist if (p.get("service") or "") != "stage"]
     deep_link = _row_get(row, "deep_link")
 

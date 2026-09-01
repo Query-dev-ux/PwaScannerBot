@@ -218,62 +218,16 @@ class CdpBridge:
 
     @staticmethod
     def _normalize(ev: dict) -> dict:
-        meta = {}
-        for m in ev.get("eventMetadata", []) or []:
-            k = (m.get("key") or "").strip()
-            if k:
-                meta[k] = m.get("value")
-        low = {k.lower(): v for k, v in meta.items()}
+        from app.utils import extract_push_fields
 
-        def pick(*subs):
-            for sub in subs:
-                for k, v in low.items():
-                    if sub in k and v not in (None, ""):
-                        return v
-            return None
-
-        svc = ev.get("service")
-        title = pick("title")
-        body = pick("body", "message", "text", "content")
-        icon = pick("icon", "image", "badge")
-        url = pick("click_action", "landing url", "notification data", "url", "link")
-
-        # pushMessaging "Push message received" carries the raw (already
-        # decrypted) payload — usually a JSON blob with the real fields.
-        payload = meta.get("Payload") or low.get("payload")
-        if payload and isinstance(payload, str) and (not title or not body):
-            try:
-                d = json.loads(payload)
-                cands = [d]
-                if isinstance(d, dict):
-                    cands += [d.get("notification"), d.get("data"), d.get("aps"),
-                              (d.get("data") or {}).get("notification")
-                              if isinstance(d.get("data"), dict) else None]
-                for c in cands:
-                    if not isinstance(c, dict):
-                        continue
-                    alert = c.get("alert")
-                    title = title or c.get("title") or (
-                        alert.get("title") if isinstance(alert, dict) else None)
-                    body = (body or c.get("body") or c.get("message") or c.get("text")
-                            or (alert if isinstance(alert, str) else None)
-                            or (alert.get("body") if isinstance(alert, dict) else None))
-                    icon = icon or c.get("icon") or c.get("image")
-                    url = (url or c.get("url") or c.get("click_action")
-                           or c.get("link") or c.get("landing_url"))
-            except Exception:
-                pass
-
-        if not body and svc == "pushMessaging" and isinstance(payload, str):
-            body = payload
-
+        f = extract_push_fields(ev)
         return {
             "ts": ev.get("timestamp") or time.time(),
-            "service": svc,
+            "service": ev.get("service"),
             "event": ev.get("eventName"),
-            "title": title,
-            "body": body,
-            "icon": icon,
-            "url": url,
+            "title": f["title"],
+            "body": f["body"],
+            "icon": f["icon"],
+            "url": f["url"],
             "raw": json.dumps(ev, ensure_ascii=False),
         }

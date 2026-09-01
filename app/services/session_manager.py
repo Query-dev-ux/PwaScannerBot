@@ -1165,6 +1165,8 @@ class SessionManager:
         hold = proxy.get("hold") or self.s.hold_proxy
         if not hold:
             return None
+        if hold.strip().lower() == "direct":
+            return "direct"  # proxyless — pushes arrive over the FCM connection
         return pproxy_upstream({"server": hold})
 
     async def _swap_to_hold(self, sess: dict) -> None:

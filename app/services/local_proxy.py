@@ -48,9 +48,11 @@ class LocalProxy:
 
     async def _bind(self) -> None:
         server = pproxy.Server(f"http://127.0.0.1:{self._port}/")
-        remote = pproxy.Connection(self.upstream)
+        # upstream == "direct" -> pproxy makes direct connections (no proxy)
+        rservers = [] if self.upstream in ("direct", "", None) \
+            else [pproxy.Connection(self.upstream)]
         self._handler = await server.start_server(
-            {"rserver": [remote], "verbose": _verbose}
+            {"rserver": rservers, "verbose": _verbose}
         )
 
     async def start(self) -> str:

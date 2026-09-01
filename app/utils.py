@@ -20,6 +20,60 @@ def esc(text: str | None) -> str:
     return html.escape(str(text)) if text is not None else ""
 
 
+def extract_push_fields(ev: dict) -> dict:
+    """Pull title/body/icon/url out of a CDP BackgroundService event dict
+    (works both live and on a stored `raw` event)."""
+    import json as _json
+
+    meta = {}
+    for m in ev.get("eventMetadata", []) or []:
+        k = (m.get("key") or "").strip()
+        if k:
+            meta[k] = m.get("value")
+    low = {k.lower(): v for k, v in meta.items()}
+
+    def pick(*subs):
+        for sub in subs:
+            for k, v in low.items():
+                if sub in k and v not in (None, ""):
+                    return v
+        return None
+
+    svc = ev.get("service")
+    title = pick("title")
+    body = pick("body", "message", "text", "content")
+    icon = pick("icon", "image", "badge")
+    url = pick("click_action", "landing url", "notification data", "url", "link")
+
+    payload = meta.get("Payload") or low.get("payload")
+    if isinstance(payload, str) and payload and (not title or not body):
+        try:
+            d = _json.loads(payload)
+            cands = [d]
+            if isinstance(d, dict):
+                cands += [d.get("notification"), d.get("data"), d.get("aps")]
+                if isinstance(d.get("data"), dict):
+                    cands.append(d["data"].get("notification"))
+            for c in cands:
+                if not isinstance(c, dict):
+                    continue
+                alert = c.get("alert")
+                title = title or c.get("title") or (
+                    alert.get("title") if isinstance(alert, dict) else None)
+                body = (body or c.get("body") or c.get("message") or c.get("text")
+                        or (alert if isinstance(alert, str) else None)
+                        or (alert.get("body") if isinstance(alert, dict) else None))
+                icon = icon or c.get("icon") or c.get("image")
+                url = (url or c.get("url") or c.get("click_action")
+                       or c.get("link") or c.get("landing_url"))
+        except Exception:
+            pass
+
+    if not body and svc == "pushMessaging" and isinstance(payload, str):
+        body = payload
+    return {"title": title, "body": body, "icon": icon, "url": url}
+
+
 _STAGE_LABEL = {
     "install": "После установки",
     "registration": "После регистрации",

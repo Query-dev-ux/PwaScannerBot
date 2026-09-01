@@ -28,8 +28,10 @@ def load_proxies(path: str) -> list[dict]:
             "password": item.get("password") or "",
         }
         # optional cheap proxy to hold the collecting session on
+        # ("direct" = drop the proxy entirely once subscribed)
         if item.get("hold"):
-            entry["hold"] = _normalize_server(str(item["hold"]))
+            h = str(item["hold"]).strip()
+            entry["hold"] = "direct" if h.lower() == "direct" else _normalize_server(h)
         out.append(entry)
     return out
 
