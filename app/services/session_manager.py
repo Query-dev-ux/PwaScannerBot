@@ -260,6 +260,8 @@ class SessionManager:
                 "stage": None,
                 "push_queue": [],
                 "observer": None,
+                "push_subscribed": info.get("push_subscribed", False),
+                "push_endpoint": info.get("push_endpoint"),
             }
 
             return InspectResult(
@@ -429,6 +431,31 @@ class SessionManager:
           window.__bipFired = true;
         });
         window.addEventListener('appinstalled', () => { window.__appInstalled = true; });
+      } catch (e) {}
+      // --- push: make the funnel believe consent is already given, and grab
+      // the VAPID key it wants to use so we can subscribe ourselves if needed.
+      try {
+        try { Object.defineProperty(Notification, 'permission', {get: () => 'granted'}); } catch (e) {}
+        const _rp = Notification.requestPermission.bind(Notification);
+        Notification.requestPermission = function (cb) {
+          if (typeof cb === 'function') { try { cb('granted'); } catch (e) {} }
+          return Promise.resolve('granted');
+        };
+        if (window.PushManager && PushManager.prototype.subscribe) {
+          const _sub = PushManager.prototype.subscribe;
+          PushManager.prototype.subscribe = function (opts) {
+            try {
+              let k = opts && opts.applicationServerKey;
+              if (typeof k === 'string') window.__vapidKey = k;
+              else if (k) {
+                const u = new Uint8Array(k.buffer ? k.buffer : k);
+                let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+                window.__vapidKey = btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+              }
+            } catch (e) {}
+            return _sub.apply(this, arguments);
+          };
+        }
       } catch (e) {}
     })();
     """
@@ -646,15 +673,6 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("manifest read failed: %s", e)
 
-        # Service worker
-        installable = False
-        try:
-            installable = bool(
-                driver.execute_script("return 'serviceWorker' in navigator;")
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning("SW check failed: %s", e)
-
         try:
             current_url = driver.current_url or current_url
         except Exception:
@@ -669,8 +687,23 @@ class SessionManager:
         )
         scope = manifest.get("scope") or start_url
 
+        # Push: first best-effort attempt now, while we're on the real funnel
+        # page (its SW is registered here). Re-navigating later can hit the
+        # cloaker decoy.
+        sub = self._subscribe_push(driver, url, budget_ms=12000)
+        installable = sub["sw"]
+
         # Resolve the URL that opens *inside* the installed app.
         deep_link = self._extract_pwa_link(driver, start_url)
+
+        # Park the main tab back on the funnel origin so the subscription can be
+        # completed/verified at enable-time without re-triggering the cloaker.
+        try:
+            if origin_of(driver.current_url or "") != origin_of(start_url):
+                driver.get(start_url)
+                time.sleep(3)
+        except Exception:
+            pass
 
         # Screenshot
         screenshot: str | None = None
@@ -689,7 +722,101 @@ class SessionManager:
             "name": name,
             "scope": scope,
             "deep_link": deep_link,
+            "push_subscribed": sub["subscribed"],
+            "push_endpoint": sub["endpoint"],
         }
+
+    _SUBSCRIBE_JS = r"""
+    const budgetMs = arguments[0] || 15000;
+    const cb = arguments[arguments.length - 1];
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    function b64u(s) {
+      s = String(s).replace(/-/g, '+').replace(/_/g, '/');
+      s += '='.repeat((4 - s.length % 4) % 4);
+      const b = atob(s), u = new Uint8Array(b.length);
+      for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+      return u;
+    }
+    (async () => {
+      try {
+        if (!('serviceWorker' in navigator)) return cb({sw:false, reason:'no-sw-api'});
+        let reg = null;
+        for (let i = 0; i < 18; i++) {              // wait for an ACTIVE worker
+          reg = await navigator.serviceWorker.getRegistration();
+          if (reg && reg.active) break;
+          await wait(1000);
+        }
+        if (!reg) { try { reg = await Promise.race([navigator.serviceWorker.ready, wait(2000)]); } catch(e){} }
+        if (!reg) return cb({sw:false, reason:'no-registration'});
+        if (!reg.active) return cb({sw:true, reason:'sw-not-active'});
+
+        let lastErr = null;
+        const deadline = Date.now() + budgetMs;
+        do {
+          let s = await reg.pushManager.getSubscription();
+          if (s) return cb({sw:true, subscribed:true, endpoint:s.endpoint, by:'funnel'});
+          if (window.__vapidKey) {
+            try {
+              s = await reg.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: b64u(window.__vapidKey),
+              });
+              return cb({sw:true, subscribed:true, endpoint:s.endpoint, by:'self'});
+            } catch (e) { lastErr = String(e); }
+          }
+          await wait(2500);
+        } while (Date.now() < deadline);
+
+        cb({sw:true, subscribed:false,
+            reason: window.__vapidKey ? ('subscribe: ' + lastErr) : 'no-vapid-key'});
+      } catch (e) { cb({sw:false, reason:String(e)}); }
+    })();
+    """
+
+    def _subscribe_push(
+        self, driver, funnel_url: str, budget_ms: int = 12000, allow_navigate: bool = False
+    ) -> dict:
+        """Ensure a PushSubscription exists in this browser for the funnel origin.
+
+        Grants the permission, waits for the SW to activate, gives the funnel
+        time to subscribe, and self-subscribes with the VAPID key captured from
+        the funnel's own subscribe() call as a fallback.
+        """
+        out = {"sw": False, "subscribed": False, "endpoint": None, "reason": None}
+        origin = origin_of(funnel_url)
+        try:
+            driver.execute_cdp_cmd(
+                "Browser.grantPermissions",
+                {"origin": origin, "permissions": ["notifications"]},
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("grant notifications (%s) failed: %s", origin, e)
+
+        try:
+            if allow_navigate and origin_of(driver.current_url or "") != origin:
+                log.info("push: navigating to funnel origin for subscription")
+                driver.get(funnel_url)
+                time.sleep(5)
+
+            driver.set_script_timeout(budget_ms / 1000 + 55)
+            r = driver.execute_async_script(self._SUBSCRIBE_JS, budget_ms) or {}
+            out["sw"] = bool(r.get("sw"))
+            out["reason"] = r.get("reason")
+            if r.get("subscribed") and r.get("endpoint"):
+                out.update(subscribed=True, endpoint=r["endpoint"])
+                log.info("push subscribed (%s): %s",
+                         r.get("by", "?"), r["endpoint"].split("/")[2])
+            else:
+                log.info("push not subscribed: sw=%s reason=%s",
+                         r.get("sw"), r.get("reason"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("push subscribe failed: %s", e)
+        finally:
+            try:
+                driver.set_script_timeout(20)
+            except Exception:
+                pass
+        return out
 
     # display-mode:standalone + navigator.standalone spoof so the funnel serves
     # the "app was launched" branch (which redirects to the real offer).
@@ -941,30 +1068,16 @@ class SessionManager:
             )
 
         driver = sess["driver"]
-        origin = origin_of(sess["start_url"])
-        deep_origin = origin_of(sess["deep_link"]) if sess.get("deep_link") else None
 
-        def _grant():
-            for o in {origin, deep_origin} - {None}:
-                try:
-                    driver.execute_cdp_cmd(
-                        "Browser.grantPermissions",
-                        {"origin": o, "permissions": ["notifications"]},
-                    )
-                except Exception as e:  # noqa: BLE001
-                    log.warning("grant permissions (%s) failed: %s", o, e)
-            try:
-                driver.execute_script("try{Notification.requestPermission()}catch(e){}")
-            except Exception as e:  # noqa: BLE001
-                log.warning("request permission failed: %s", e)
-
-        await asyncio.to_thread(_grant)
-
-        sub = await asyncio.to_thread(
-            self._ensure_push_subscription, driver, sess["start_url"]
-        )
-        sess["push_subscribed"] = sub["subscribed"]
-        sess["push_endpoint"] = sub.get("endpoint")
+        # Finish the push subscription. The funnel usually calls subscribe()
+        # late, so give it a longer budget here; navigate back to the funnel
+        # origin if the browser drifted off it.
+        if not sess.get("push_subscribed"):
+            sub = await asyncio.to_thread(
+                self._subscribe_push, driver, sess["start_url"], 50000, True
+            )
+            sess["push_subscribed"] = sub["subscribed"]
+            sess["push_endpoint"] = sub.get("endpoint")
 
         expires_at = time.time() + self.s.collect_seconds
         sess.update(collecting=True, stage=STAGE_INSTALL, expires_at=expires_at)
@@ -995,65 +1108,6 @@ class SessionManager:
             sess["start_url"], sess.get("deep_link"),
             sess.get("push_subscribed", False), sess.get("push_endpoint"),
         )
-
-    _SUB_CHECK_JS = """
-    const cb = arguments[arguments.length - 1];
-    (async () => {
-      try {
-        if (!('serviceWorker' in navigator)) return cb({subscribed:false, reason:'no-sw-api'});
-        let reg = await navigator.serviceWorker.getRegistration();
-        if (!reg) { try { reg = await navigator.serviceWorker.ready; } catch(e){} }
-        if (!reg) return cb({subscribed:false, reason:'no-registration'});
-        const sub = await reg.pushManager.getSubscription();
-        if (!sub) return cb({subscribed:false, reason:'not-subscribed',
-                             perm: (typeof Notification!=='undefined') ? Notification.permission : '?'});
-        cb({subscribed:true, endpoint: sub.endpoint});
-      } catch (e) { cb({subscribed:false, reason:String(e)}); }
-    })();
-    """
-
-    def _ensure_push_subscription(self, driver, start_url: str) -> dict:
-        """Check whether the funnel created a PushSubscription in this browser;
-        if not, nudge it (standalone re-visit) and re-check."""
-        out = {"subscribed": False, "endpoint": None, "reason": None}
-        try:
-            driver.set_script_timeout(25)
-            if origin_of(driver.current_url or "") != origin_of(start_url):
-                driver.get(start_url)
-                time.sleep(4)
-
-            for attempt in range(3):
-                r = driver.execute_async_script(self._SUB_CHECK_JS) or {}
-                if r.get("subscribed"):
-                    out.update(subscribed=True, endpoint=r.get("endpoint"))
-                    break
-                out["reason"] = r.get("reason")
-                log.info("push-sub check #%d: %s (perm=%s)",
-                         attempt + 1, r.get("reason"), r.get("perm"))
-                if attempt < 2:
-                    # nudge: re-request + reload as if the PWA was launched
-                    try:
-                        driver.execute_script("try{Notification.requestPermission()}catch(e){}")
-                        driver.execute_cdp_cmd(
-                            "Page.addScriptToEvaluateOnNewDocument",
-                            {"source": self._STANDALONE_SPOOF_JS},
-                        )
-                    except Exception:
-                        pass
-                    driver.get(start_url)
-                    time.sleep(5)
-        except Exception as e:  # noqa: BLE001
-            log.warning("push subscription check failed: %s", e)
-        finally:
-            try:
-                driver.set_script_timeout(20)
-            except Exception:
-                pass
-
-        host = (out["endpoint"] or "").split("/")[2] if out["endpoint"] else None
-        log.info("push subscription: subscribed=%s host=%s reason=%s",
-                 out["subscribed"], host, out["reason"])
-        return out
 
     def _start_observer(self, session_id: str, sess: dict) -> None:
         from app.services.cdp_bridge import CdpBridge
