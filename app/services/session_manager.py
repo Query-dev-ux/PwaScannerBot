@@ -267,12 +267,34 @@ class SessionManager:
                 except Exception:
                     pass
 
+                body_txt = ""
+                try:
+                    body_txt = driver.execute_script(
+                        "return document.body?document.body.innerText:''") or ""
+                except Exception:
+                    pass
+                if not manifest and len(body_txt.strip()) < 20:
+                    hint = "гео/трек-параметры под оффер"
+                    if (geo or {}).get("hosting") and not (geo or {}).get("mobile"):
+                        hint = (
+                            f"выходной IP {geo.get('ip')} ({geo.get('isp')}) — "
+                            "дата-центр, нужна мобильная/резидентная прокси"
+                        )
+                    raise RuntimeError(
+                        f"воронка вернула пустую страницу — декой клоаки "
+                        f"({hint}); title={title!r}"
+                    )
+
                 base = cur if cur.startswith("http") else url
                 start_url = urljoin(base, "/")
                 if manifest.get("start_url"):
                     start_url = urljoin(murl or base, manifest["start_url"])
                 name = (manifest.get("name") or manifest.get("short_name")
                         or title or url)
+                log.info(
+                    "offer-link scan: name=%r start_url=%s manifest=%s",
+                    name, start_url, bool(manifest),
+                )
                 launch = self._launch_pwa(driver, start_url, link_only=True)
                 return {
                     "name": name,
