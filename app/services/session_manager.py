@@ -381,6 +381,7 @@ class SessionManager:
 
             def work() -> dict:
                 self._apply_stealth(driver, geo)
+                m = {}
                 for _ in range(4):
                     try:
                         driver.get(url)
@@ -394,33 +395,53 @@ class SessionManager:
                         driver.delete_all_cookies()
                     except Exception:
                         pass
-                # optional standalone launch to also grab the pwa_ page's chunks
-                files = driver.execute_async_script(r"""
+                start_url = (m or {}).get("start_url") or url
+                return driver.execute_async_script(r"""
                   const cb = arguments[arguments.length - 1];
+                  const startUrl = arguments[0];
                   const org = location.origin;
-                  const urls = new Set();
+                  const urls = new Set(['/push/vapp/VappWorker.js',
+                    '/PwaWorker.js', '/revisionMap.json']);
                   for (const s of document.scripts)
                     if (s.src && s.src.indexOf(org) === 0) urls.add(s.src);
                   (async () => {
-                    try {
-                      const reg = await navigator.serviceWorker.getRegistration();
-                      const u = reg && (reg.active||reg.installing||reg.waiting);
-                      if (u && u.scriptURL) urls.add(u.scriptURL);
-                    } catch (e) {}
                     const out = {};
-                    for (const u of urls) {
-                      try { out[u] = await fetch(u).then(r => r.text()); }
-                      catch (e) { out[u] = '/* fetch failed: ' + e + ' */'; }
+                    // grab the raw HTML of the funnel root + the pwa_ start_url
+                    for (const [k, u] of [['__html_root__', org + '/'],
+                                          ['__html_start__', startUrl]]) {
+                      try {
+                        const t = await fetch(u, {credentials:'include'})
+                          .then(r => r.text());
+                        out[k] = t;
+                        // pull assets/*.js and /push/*.js refs out of the HTML
+                        (t.match(/[\w./-]*assets\/[\w.-]+\.js/g) || [])
+                          .forEach(x => urls.add(new URL(x, org).href));
+                      } catch (e) { out[k] = '/* ' + e + ' */'; }
                     }
-                    // also the raw pwa_ page HTML
-                    try {
-                      const m = document.querySelector('link[rel~="manifest"]');
-                      out['__manifest__'] = m ? await fetch(m.href).then(r=>r.text()) : '';
-                    } catch (e) {}
+                    // walk one level of JS to find more chunk names
+                    for (const u of [...urls]) {
+                      if (!/\.js($|\?)/.test(u)) continue;
+                      try {
+                        const t = await fetch(u).then(r => r.text());
+                        out[u] = t;
+                        (t.match(/assets\/[\w.-]+\.js/g) || [])
+                          .forEach(x => urls.add(new URL('/' + x, org).href));
+                        (t.match(/\/push\/[\w./-]+\.js/g) || [])
+                          .forEach(x => urls.add(new URL(x, org).href));
+                      } catch (e) { out[u] = '/* ' + e + ' */'; }
+                    }
+                    for (const u of urls) {
+                      if (u in out) continue;
+                      try { out[u] = await fetch(u).then(r => r.text()); }
+                      catch (e) { out[u] = '/* ' + e + ' */'; }
+                    }
+                    out['__has_va_app_id__'] = JSON.stringify({
+                      root: /va_app_id/.test(out['__html_root__'] || ''),
+                      start: /va_app_id/.test(out['__html_start__'] || ''),
+                    });
                     cb(out);
                   })();
-                """) or {}
-                return files
+                """, start_url) or {}
 
             files = await asyncio.to_thread(work)
             for u, text in files.items():
