@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
@@ -320,6 +320,13 @@ class SessionManager:
                 start_url = urljoin(base, "/")
                 if manifest.get("start_url"):
                     start_url = urljoin(murl or base, manifest["start_url"])
+                # Carry the original click params into the launch so the funnel
+                # fills them into the deep link ({sub10}/{sub9}/click_id/...).
+                orig_q = urlsplit(url).query
+                if orig_q and not urlsplit(start_url).query:
+                    s = urlsplit(start_url)
+                    start_url = urlunsplit(
+                        (s.scheme, s.netloc, s.path, orig_q, ""))
                 name = (manifest.get("name") or manifest.get("short_name")
                         or title or url)
                 log.info(
