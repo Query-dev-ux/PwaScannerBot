@@ -108,13 +108,18 @@ class SessionManager:
     # hard-403 desktop traffic, so we must look like a real mobile Chrome -
     # including consistent Sec-CH-UA client hints, which Chrome's native mobile
     # emulation produces and a bare UA override does not.
+    # The real device (version + model) lives in the client-hint metadata; the
+    # UA STRING must be the frozen "Android 10; K" form Chrome 110+ ships since
+    # User-Agent Reduction — funnels reject a UA that still carries a real
+    # Android version/model as a spoof (verified: newlifejoker.club bails on
+    # push subscription when the UA is not "Android 10; K").
     _ANDROID_MODEL = "Pixel 7"
     _ANDROID_VERSION = "14.0.0"
 
     def _mobile_ua(self, chrome_major: str) -> str:
         return (
-            f"Mozilla/5.0 (Linux; Android 14; {self._ANDROID_MODEL}) "
-            f"AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Mozilla/5.0 (Linux; Android 10; K) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
             f"Chrome/{chrome_major}.0.0.0 Mobile Safari/537.36"
         )
 
