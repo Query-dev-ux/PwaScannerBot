@@ -41,6 +41,7 @@ class InspectResult:
     deep_link: str | None = None
     push_subscribed: bool = False
     push_by: str | None = None
+    shell: bool = False
 
 
 @dataclass
@@ -365,7 +366,7 @@ class SessionManager:
             return InspectResult(
                 session_id, name, start_url, scope, installable, screenshot,
                 deep_link, bool(info.get("push_subscribed")),
-                info.get("push_by"),
+                info.get("push_by"), bool(info.get("shell")),
             )
 
         except Exception as e:
@@ -787,13 +788,23 @@ class SessionManager:
         )
         scope = manifest.get("scope") or start_url
 
-        # Best-effort: if the funnel subscribes on the normal page (yap-games
-        # style), grab it now.
-        early = self._subscribe_push(driver, url, budget_ms=8000)
-
-        # Simulate the PWA launch: resolve the in-app deep link AND collect the
-        # push subscription that fake-store funnels create only in standalone.
-        launch = self._launch_pwa(driver, start_url)
+        # A funnel with no manifest AND an empty <body> is a cloaker decoy /
+        # broken landing — don't burn ~5 min on push-subscription retries.
+        shell = not manifest and len((page_text or "").strip()) < 20
+        if shell:
+            log.warning(
+                "funnel returned an empty shell (title=%r, no manifest) — "
+                "likely a cloaker decoy; skipping push subscription", page_title,
+            )
+            launch = self._launch_pwa(driver, start_url, link_only=True)
+            early = {"subscribed": False, "endpoint": None, "sw": False}
+        else:
+            # Best-effort: if the funnel subscribes on the normal page
+            # (yap-games style), grab it now.
+            early = self._subscribe_push(driver, url, budget_ms=8000)
+            # Simulate the PWA launch: resolve the in-app deep link AND collect
+            # the push subscription (fake-store funnels only subscribe here).
+            launch = self._launch_pwa(driver, start_url)
         deep_link = launch["deep_link"]
         push_subscribed = early["subscribed"] or launch["push_subscribed"]
         push_endpoint = early["endpoint"] or launch["push_endpoint"]
@@ -829,6 +840,7 @@ class SessionManager:
             "push_subscribed": push_subscribed,
             "push_endpoint": push_endpoint,
             "push_by": push_by,
+            "shell": shell,
         }
 
     _SUBSCRIBE_JS = r"""
@@ -1078,7 +1090,7 @@ class SessionManager:
                 # The funnel fires subscribe() before its SW is active and never
                 # retries. Reload the funnel a couple of times once the SW is
                 # active so it can subscribe for real (and POST to its backend).
-                for rnd in range(3):
+                for rnd in range(2):
                     try:
                         driver.get(origin + "/")
                         time.sleep(2)

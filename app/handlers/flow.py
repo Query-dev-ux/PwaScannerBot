@@ -79,10 +79,19 @@ async def got_url(message: Message, state: FSMContext, manager: SessionManager):
         await status.edit_text(f"Ошибка: <code>{esc(str(e))}</code>")
         return
 
+    tail = "\n\nСессия <b>не сохранена</b>. Включи сбор push, чтобы начать."
+    if res.shell:
+        tail = (
+            "\n\n⚠️ Воронка вернула <b>пустую страницу</b> (нет manifest, пустой body). "
+            "Обычно это декой клоаки. Проверь: гео прокси под оффер, "
+            "убери шаблонные плейсхолдеры из ссылки "
+            "(<code>{{campaign.name}}</code>, <code>{pixel}</code> и т.п.), "
+            "попробуй другой прокси."
+        )
     await status.edit_text(
         session_card(res.name, res.start_url, res.deep_link,
                      push_subscribed=res.push_subscribed)
-        + "\n\nСессия <b>не сохранена</b>. Включи сбор push, чтобы начать.",
+        + tail,
         reply_markup=enable_push_kb(res.session_id),
     )
 
