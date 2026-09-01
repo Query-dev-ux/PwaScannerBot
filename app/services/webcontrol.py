@@ -90,10 +90,13 @@ class WebControl:
             await self._runner.cleanup()
 
     # ---- registry
-    def register(self, session_id: str, name: str, bridge) -> str:
+    def register(self, session_id: str, name: str, bridge, on_view=None) -> str:
         self.unregister(session_id)
         token = secrets.token_urlsafe(12)
-        self._by_token[token] = {"session_id": session_id, "name": name, "bridge": bridge}
+        self._by_token[token] = {
+            "session_id": session_id, "name": name, "bridge": bridge,
+            "on_view": on_view,
+        }
         self._by_session[session_id] = token
         return token
 
@@ -131,6 +134,10 @@ class WebControl:
             with contextlib.suppress(Exception):
                 loop.call_soon_threadsafe(_offer, q, frame)
 
+        on_view = entry.get("on_view")
+        if on_view:
+            with contextlib.suppress(Exception):
+                on_view(True)
         bridge.set_frame_sink(sink)
         sender = asyncio.create_task(_pump(ws, q))
         try:
@@ -142,6 +149,9 @@ class WebControl:
         finally:
             sender.cancel()
             bridge.set_frame_sink(None)
+            if on_view:
+                with contextlib.suppress(Exception):
+                    on_view(False)
         return ws
 
 

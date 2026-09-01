@@ -39,6 +39,7 @@ async def main() -> None:
     scheduler.add_job(manager.finalize_expired, "interval", minutes=settings.sweep_minutes)
     scheduler.add_job(manager.flush_pushes, "interval", seconds=45)
     scheduler.add_job(manager.sweep_stale, "interval", minutes=10)
+    scheduler.add_job(manager.retry_subscriptions, "interval", minutes=4)
     scheduler.start()
 
     dp["settings"] = settings

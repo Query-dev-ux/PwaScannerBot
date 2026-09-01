@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   scope TEXT,
   deep_link TEXT,
   stage TEXT,
+  push_subscribed INTEGER DEFAULT 0,
+  push_endpoint TEXT,
   profile_dir TEXT,
   status TEXT,
   created_at REAL,
@@ -60,6 +62,12 @@ class Database:
                 await db.execute("ALTER TABLE sessions ADD COLUMN deep_link TEXT")
             if "stage" not in scols:
                 await db.execute("ALTER TABLE sessions ADD COLUMN stage TEXT")
+            if "push_subscribed" not in scols:
+                await db.execute(
+                    "ALTER TABLE sessions ADD COLUMN push_subscribed INTEGER DEFAULT 0"
+                )
+            if "push_endpoint" not in scols:
+                await db.execute("ALTER TABLE sessions ADD COLUMN push_endpoint TEXT")
             cur = await db.execute("PRAGMA table_info(pushes)")
             pcols = {r[1] for r in await cur.fetchall()}
             if "stage" not in pcols:
@@ -81,10 +89,13 @@ class Database:
             await db.execute(
                 """INSERT INTO sessions
                 (id,user_id,chat_id,proxy,site_url,pwa_name,start_url,scope,deep_link,stage,
+                 push_subscribed,push_endpoint,
                  profile_dir,status,created_at,expires_at,delivered_at)
                 VALUES (:id,:user_id,:chat_id,:proxy,:site_url,:pwa_name,:start_url,:scope,:deep_link,:stage,
+                        :push_subscribed,:push_endpoint,
                         :profile_dir,:status,:created_at,:expires_at,:delivered_at)""",
-                {"deep_link": None, "stage": None, **d},
+                {"deep_link": None, "stage": None, "push_subscribed": 0,
+                 "push_endpoint": None, **d},
             )
             await db.commit()
 

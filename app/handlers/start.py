@@ -57,6 +57,7 @@ async def _show_sessions(message: Message, db: Database) -> None:
             session_card(
                 r["pwa_name"] or r["site_url"], r["start_url"], r["deep_link"],
                 STAGE_LABEL.get(stage, stage), cnt, until,
+                bool(r["push_subscribed"]),
             ),
             reply_markup=collecting_actions_kb(r["id"], stage),
         )

@@ -832,34 +832,6 @@ class SessionManager:
         "try{Object.defineProperty(navigator,'standalone',{get:()=>true});}catch(e){}})();"
     )
 
-    _QUICK_SUB_JS = r"""
-    const cb = arguments[arguments.length - 1];
-    const wait = ms => new Promise(r => setTimeout(r, ms));
-    function b64u(s){s=String(s).replace(/-/g,'+').replace(/_/g,'/');
-      s+='='.repeat((4-s.length%4)%4);const b=atob(s),u=new Uint8Array(b.length);
-      for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
-    (async () => {
-      try {
-        let reg = null;
-        for (let i = 0; i < 8; i++) {
-          reg = await navigator.serviceWorker.getRegistration();
-          if (reg && reg.active) break;
-          await wait(700);
-        }
-        if (!reg || !reg.active) return cb({});
-        let s = await reg.pushManager.getSubscription();
-        if (s) return cb({endpoint: s.endpoint, by: 'funnel'});
-        if (window.__vapidKey) {
-          try {
-            s = await reg.pushManager.subscribe({
-              userVisibleOnly: true, applicationServerKey: b64u(window.__vapidKey)});
-            return cb({endpoint: s.endpoint, by: 'self'});
-          } catch (e) {}
-        }
-        cb({});
-      } catch (e) { cb({}); }
-    })();
-    """
 
     def _launch_pwa(self, driver, start_url: str) -> dict:
         """Open start_url in a fresh tab emulating a PWA launch. Follows the
@@ -873,91 +845,76 @@ class SessionManager:
             original = driver.current_window_handle
             driver.switch_to.new_window("tab")
             try:
-                driver.execute_cdp_cmd(
-                    "Page.addScriptToEvaluateOnNewDocument",
-                    {"source": self._STANDALONE_SPOOF_JS},
-                )
+                # the new tab is a fresh target - re-inject the page hooks
+                # (VAPID capture + Notification.permission=granted live here too)
+                for src in (self._STEALTH_JS, self._STANDALONE_SPOOF_JS):
+                    driver.execute_cdp_cmd(
+                        "Page.addScriptToEvaluateOnNewDocument", {"source": src}
+                    )
                 driver.execute_cdp_cmd(
                     "Browser.grantPermissions",
                     {"origin": origin, "permissions": ["notifications"]},
                 )
             except Exception as e:  # noqa: BLE001
-                log.warning("standalone/grant inject failed: %s", e)
+                log.warning("launch-tab hook inject failed: %s", e)
 
             driver.set_page_load_timeout(45)
             driver.set_script_timeout(12)
             norm = lambda u: (u or "").rstrip("/").split("#")[0]
 
-            for rnd in range(2):
+            def _grab_sub(budget_ms):
+                if out["push_endpoint"]:
+                    return
                 try:
-                    driver.get(start_url)
-                except TimeoutException:
-                    pass
+                    driver.set_script_timeout(budget_ms / 1000 + 6)
+                    r = driver.execute_async_script(self._SUBSCRIBE_JS, budget_ms) or {}
+                    driver.set_script_timeout(12)
+                    if r.get("endpoint"):
+                        out.update(push_subscribed=True, push_endpoint=r["endpoint"])
+                        log.info("pwa launch: push subscribed (%s) %s",
+                                 r.get("by"), r["endpoint"].split("/")[2])
+                except Exception as e:  # noqa: BLE001
+                    log.warning("sub grab failed: %s", e)
 
-                last, stable = None, 0
-                final = start_url
-                for i in range(30):
-                    on_origin = origin_of(driver.current_url or "") == origin
-                    if not out["push_endpoint"] and on_origin:
-                        try:
-                            r = driver.execute_async_script(self._QUICK_SUB_JS) or {}
-                            if r.get("endpoint"):
-                                out.update(push_subscribed=True, push_endpoint=r["endpoint"])
-                                log.info("pwa launch: push subscribed (%s) %s",
-                                         r.get("by"), r["endpoint"].split("/")[2])
-                        except Exception:
-                            pass
-                    time.sleep(1)
-                    try:
-                        cur = driver.current_url or ""
-                    except Exception:
-                        break
-                    if cur and not cur.startswith("about:"):
-                        final = cur
-                    redirected = norm(cur) not in ("", norm(start_url)) and \
-                        origin_of(cur) != origin
-                    if cur == last:
-                        stable += 1
-                        # redirected -> stop soon; only-subscribed -> give the
-                        # redirect ~18s more before giving up on it this round
-                        if stable >= 3 and (
-                            (redirected and i >= 5)
-                            or (out["push_endpoint"] and i >= 18)
-                        ):
-                            break
-                    else:
-                        stable, last = 0, cur
+            try:
+                driver.get(start_url)
+            except TimeoutException:
+                pass
 
-                if norm(final) and norm(final) != norm(start_url):
-                    out["deep_link"] = final
-                    log.info("pwa deep link: %s", final)
-
-                # The funnel/SW may have subscribed while (or just after) it
-                # redirected us away. Check from a plain resource on the funnel
-                # origin — the SW registration + subscription persist regardless.
-                if not out["push_endpoint"]:
-                    try:
-                        driver.get(origin + "/favicon.ico")
-                        time.sleep(1.5)
-                        driver.set_script_timeout(25)
-                        r = driver.execute_async_script(self._SUBSCRIBE_JS, 18000) or {}
-                        driver.set_script_timeout(12)
-                        if r.get("endpoint"):
-                            out.update(push_subscribed=True, push_endpoint=r["endpoint"])
-                            log.info("pwa launch: push subscribed post-redirect (%s) %s",
-                                     r.get("by"), r["endpoint"].split("/")[2])
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("post-redirect sub check failed: %s", e)
-
-                have_deep = norm(out["deep_link"]) != norm(start_url)
-                if (out["push_endpoint"] and have_deep) or rnd == 1:
+            last, stable, final = None, 0, start_url
+            for i in range(30):
+                if not out["push_endpoint"] and origin_of(driver.current_url or "") == origin:
+                    _grab_sub(3000)
+                time.sleep(1)
+                try:
+                    cur = driver.current_url or ""
+                except Exception:
                     break
-                log.info("pwa launch: retrying (deep=%s sub=%s)",
-                         have_deep, bool(out["push_endpoint"]))
-                time.sleep(2)
+                if cur and not cur.startswith("about:"):
+                    final = cur
+                redirected = origin_of(cur) != origin and norm(cur) != norm(start_url)
+                if cur == last:
+                    stable += 1
+                    if stable >= 3 and (redirected or (out["push_endpoint"] and i >= 15)):
+                        break
+                else:
+                    stable, last = 0, cur
 
-            if norm(out["deep_link"]) == norm(start_url):
+            if norm(final) and norm(final) != norm(start_url):
+                out["deep_link"] = final
+                log.info("pwa deep link: %s", final)
+            else:
                 log.info("no redirect on PWA launch - deep link = start_url")
+
+            # subscription may have landed while/after it redirected us away —
+            # check from a plain resource on the funnel origin (SW + sub persist)
+            if not out["push_endpoint"]:
+                try:
+                    driver.get(origin + "/favicon.ico")
+                    time.sleep(1.5)
+                    _grab_sub(15000)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("post-redirect sub check failed: %s", e)
         except Exception as e:  # noqa: BLE001
             log.warning("pwa launch failed: %s", e)
         finally:
@@ -1181,6 +1138,8 @@ class SessionManager:
                 "scope": sess["scope"],
                 "deep_link": sess.get("deep_link"),
                 "stage": STAGE_INSTALL,
+                "push_subscribed": 1 if sess.get("push_subscribed") else 0,
+                "push_endpoint": sess.get("push_endpoint"),
                 "profile_dir": sess["profile_dir"],
                 "status": "collecting",
                 "created_at": sess.get("scanned_at", time.time()),
@@ -1218,7 +1177,10 @@ class SessionManager:
         sess["observer"] = bridge
         if self.webcontrol:
             try:
-                self.webcontrol.register(session_id, sess["pwa_name"], bridge)
+                self.webcontrol.register(
+                    session_id, sess["pwa_name"], bridge,
+                    on_view=lambda a, s=sess: s.__setitem__("ctl_active", a),
+                )
             except Exception as e:  # noqa: BLE001
                 log.warning("webcontrol register failed: %s", e)
 
@@ -1258,6 +1220,43 @@ class SessionManager:
                     await self.db.add_push(sid, rec)
                 except Exception as e:  # noqa: BLE001
                     log.warning("add_push failed: %s", e)
+
+    async def retry_subscriptions(self) -> None:
+        """These funnels subscribe to push non-deterministically. For the first
+        ~30 min of a collecting session keep retrying a standalone PWA launch
+        until a subscription lands."""
+        now = time.time()
+        for sid, sess in list(self._sessions.items()):
+            if (
+                not sess.get("collecting")
+                or sess.get("push_subscribed")
+                or sess.get("stage") != STAGE_INSTALL
+                or sess.get("ctl_active")
+                or now - sess.get("scanned_at", now) > 1800
+            ):
+                continue
+            try:
+                launch = await asyncio.to_thread(
+                    self._launch_pwa, sess["driver"], sess["start_url"]
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("retry_subscriptions %s: %s", sid[:8], e)
+                continue
+            if launch.get("push_subscribed"):
+                sess["push_subscribed"] = True
+                sess["push_endpoint"] = launch.get("push_endpoint")
+                await self.db.set_session_fields(
+                    sid, push_subscribed=1, push_endpoint=launch.get("push_endpoint")
+                )
+                log.info("retry_subscriptions: %s subscribed", sid[:8])
+                try:
+                    await self.bot.send_message(
+                        sess["chat_id"],
+                        f"🔔 Push-подписка создана — <b>{esc(sess['pwa_name'])}</b>. "
+                        "Пуши будут собираться.",
+                    )
+                except Exception:
+                    pass
 
     # ---------- interactive browser access ----------
 

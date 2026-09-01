@@ -124,6 +124,7 @@ async def advance_stage(cb: CallbackQuery, manager: SessionManager, db: Database
             session_card(
                 row["pwa_name"] or row["site_url"], row["start_url"], row["deep_link"],
                 STAGE_LABEL.get(stage, stage), cnt, until,
+                bool(row["push_subscribed"]),
             ),
             reply_markup=collecting_actions_kb(session_id, stage),
         )
