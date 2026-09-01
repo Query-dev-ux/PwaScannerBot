@@ -267,18 +267,7 @@ class SessionManager:
                     body_txt = driver.execute_script(
                         "return document.body?document.body.innerText:''") or ""
 
-                    manifest, murl = {}, None
-                    try:
-                        murl = driver.execute_script(
-                            "var l=document.querySelector('link[rel~=\"manifest\"]');"
-                            "return l?l.href:null;"
-                        )
-                        if murl:
-                            import requests
-
-                            manifest = requests.get(murl, timeout=12).json()
-                    except Exception:
-                        pass
+                    manifest, murl = self._read_manifest(driver, budget_ms=7000)
 
                     if manifest and not self._looks_blocked(title, body_txt):
                         return cur, title, manifest, murl
@@ -449,23 +438,15 @@ class SessionManager:
                             "return document.body?document.body.innerText:''") or ""
                     except Exception:
                         pass
-                    mani, murl = {}, None
-                    try:
-                        murl = driver.execute_script(
-                            "var l=document.querySelector('link[rel~=\"manifest\"]');"
-                            "return l?l.href:null;")
-                        if murl:
-                            import requests
-                            mani = requests.get(murl, timeout=12).json()
-                    except Exception:
-                        pass
+                    mani, murl = self._read_manifest(driver, budget_ms=7000)
                     blocked = self._looks_blocked(title, body)
                     lines.append(
                         f"  [{attempt}] url={esc(cur)}\n"
                         f"      title={esc(title[:70])} bodyLen={len(body)} "
                         f"blocked={blocked}\n"
                         f"      manifest={'да' if mani else 'нет'}"
-                        + (f" name={esc(str(mani.get('name')))} "
+                        f" murl={esc(str(murl))}"
+                        + (f"\n      name={esc(str(mani.get('name')))} "
                            f"start_url={esc(str(mani.get('start_url')))}"
                            if mani else "")
                     )
@@ -1016,6 +997,68 @@ class SessionManager:
             cc or "?", tz or "?", locale, self._lang_tags(accept_lang), major,
         )
 
+    # Poll for <link rel=manifest> (SPAs inject it late), then fetch it FROM THE
+    # PAGE so it goes through the proxy + browser session + cookies. A serverside
+    # requests.get() hits the cloaked origin from the datacenter IP and gets a
+    # 400/403 — which made real funnels look manifest-less (= decoy).
+    _MANIFEST_JS = r"""
+    const budget = arguments[0], cb = arguments[arguments.length - 1];
+    const t0 = Date.now();
+    (function poll() {
+      const l = document.querySelector('link[rel~="manifest"]');
+      if (l && l.href) {
+        fetch(l.href, {credentials: 'include'})
+          .then(r => r.text())
+          .then(txt => cb(JSON.stringify({href: l.href, body: txt})))
+          .catch(e => cb(JSON.stringify({href: l.href, body: null})));
+        return;
+      }
+      if (Date.now() - t0 > budget) { cb(JSON.stringify({href: null})); return; }
+      setTimeout(poll, 400);
+    })();
+    """
+
+    def _read_manifest(self, driver, budget_ms: int = 8000):
+        """Return (manifest_dict, manifest_url). {} if none / unreadable."""
+        try:
+            driver.set_script_timeout(budget_ms / 1000 + 10)
+            raw = driver.execute_async_script(self._MANIFEST_JS, budget_ms) or "{}"
+        except Exception as e:  # noqa: BLE001
+            log.warning("manifest probe failed: %s", e)
+            return {}, None
+        finally:
+            try:
+                driver.set_script_timeout(20)
+            except Exception:
+                pass
+        try:
+            d = json.loads(raw)
+        except Exception:
+            return {}, None
+        murl = d.get("href")
+        body = d.get("body")
+        if murl and not body:
+            # page fetch was blocked/opaque — last-ditch serverside try
+            try:
+                import requests
+
+                body = requests.get(murl, timeout=12).text
+            except Exception:
+                body = None
+        if not body:
+            return {}, murl
+        try:
+            m = json.loads(body)
+        except Exception:
+            return {}, murl
+        if not isinstance(m, dict):
+            return {}, murl
+        if m.get("start_url"):
+            m["start_url"] = urljoin(murl, m["start_url"])
+        if m.get("scope"):
+            m["scope"] = urljoin(murl, m["scope"])
+        return m, murl
+
     def _navigate_and_inspect(
         self, driver, url: str, profile_dir: str, geo: dict | None = None
     ) -> dict:
@@ -1102,25 +1145,12 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("funnel interaction failed: %s", e)
 
-        # Manifest
-        manifest: dict = {}
-        try:
-            manifest_url = driver.execute_script(
-                "var l=document.querySelector('link[rel~=\"manifest\"]');"
-                "return l ? l.href : null;"
-            )
-            if manifest_url:
-                import requests
-
-                resp = requests.get(manifest_url, timeout=15)
-                manifest = resp.json()
-                if manifest.get("start_url"):
-                    manifest["start_url"] = urljoin(manifest_url, manifest["start_url"])
-                if manifest.get("scope"):
-                    manifest["scope"] = urljoin(manifest_url, manifest["scope"])
-                log.info("manifest read: %s", manifest.get("name") or manifest_url)
-        except Exception as e:  # noqa: BLE001
-            log.warning("manifest read failed: %s", e)
+        # Manifest — fetched from the page (proxy + cookies), not serverside
+        manifest, manifest_url = self._read_manifest(driver, budget_ms=8000)
+        if manifest:
+            log.info("manifest read: %s", manifest.get("name") or manifest_url)
+        else:
+            log.warning("manifest read failed (url=%s)", manifest_url)
 
         try:
             current_url = driver.current_url or current_url
