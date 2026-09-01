@@ -1968,6 +1968,19 @@ class SessionManager:
                 sess["profile_dir"], proxy_url, geo, app_url=start_url)
             sess["driver"] = driver
             self._apply_stealth(driver, geo)
+            # Block the casino redirect (server-side 302, rotating newlineNNNN
+            # domain) so the pwa_ page stays put long enough to register its SW
+            # and fire subscribe(). Cleared before we return.
+            blocked = ["*newline*", "*/casino*"]
+            dl_host = urlparse(sess.get("deep_link") or "").netloc
+            if dl_host:
+                blocked.append(f"*{dl_host}*")
+            try:
+                driver.execute_cdp_cmd("Network.enable", {})
+                driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": blocked})
+                log.info("relaunch: blocking redirect to %s", blocked)
+            except Exception as e:  # noqa: BLE001
+                log.warning("relaunch: setBlockedURLs failed: %s", e)
             try:
                 driver.get(start_url)
             except TimeoutException:
@@ -2002,7 +2015,7 @@ class SessionManager:
                     out.update(subscribed=True, endpoint=r["endpoint"])
                     log.info("installed-PWA relaunch: subscribed via %s (%s)",
                              r.get("by", "?"), r["endpoint"].split("/")[2])
-                    return out
+                    break
                 try:
                     sc = driver.execute_script(
                         "return {n: window.__subCalled||0, v: !!window.__vapidKey};")
@@ -2012,9 +2025,18 @@ class SessionManager:
                 except Exception:
                     pass
                 time.sleep(3)
-            log.info("installed-PWA relaunch: still no subscription")
+            if not out["subscribed"]:
+                log.info("installed-PWA relaunch: still no subscription")
         except Exception as e:  # noqa: BLE001
             log.warning("installed-PWA relaunch failed: %s", e)
+        finally:
+            # stop blocking the redirect — the session needs to reach the offer
+            try:
+                d2 = sess.get("driver")
+                if d2:
+                    d2.execute_cdp_cmd("Network.setBlockedURLs", {"urls": []})
+            except Exception:
+                pass
         return out
 
     async def enable_push_collection(self, session_id: str) -> PushInfo:
