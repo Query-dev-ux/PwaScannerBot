@@ -1158,6 +1158,8 @@ class SessionManager:
                                         or (out["push_endpoint"] and i >= 12)):
                         break
                 else:
+                    if cur != start_url:
+                        log.info("pwa launch nav [%d]: %s", i, cur)
                     stable, last = 0, cur
 
             if norm(final) and norm(final) != norm(start_url):
@@ -1165,6 +1167,8 @@ class SessionManager:
                 log.info("pwa deep link: %s", final)
             else:
                 log.info("no redirect on PWA launch - deep link = start_url")
+                if link_only:
+                    self._log_launch_state(driver, origin)
 
             if not link_only and not out["push_endpoint"]:
                 # The funnel fires subscribe() before its SW is active and never
@@ -1221,6 +1225,48 @@ class SessionManager:
             except Exception:
                 pass
         return out
+
+    def _log_launch_state(self, driver, origin: str) -> None:
+        """Dump what the standalone launch actually rendered when no redirect
+        was seen — so we can tell WHY the deep link didn't resolve."""
+        try:
+            info = driver.execute_script(
+                r"""
+                const origin = arguments[0];
+                const abs = (h) => { try { return new URL(h, location.href).href; }
+                                     catch(e) { return null; } };
+                const meta = document.querySelector(
+                    'meta[http-equiv="refresh" i]');
+                const offOrigin = [...document.querySelectorAll('a[href]')]
+                    .map(a => a.href)
+                    .filter(h => { try { return new URL(h).origin !== origin
+                        && /^https?:/.test(h); } catch(e){ return false; } });
+                const scripts = [...document.scripts]
+                    .map(s => s.textContent || '').join('\n');
+                const locHits = (scripts.match(
+                    /(location\.(href|replace|assign)|window\.open)\s*[=(]\s*['"`][^'"`]+/g)
+                    || []).slice(0, 6);
+                const globals = Object.keys(window).filter(k =>
+                    /link|offer|redirect|target|deep|url/i.test(k)).slice(0, 15);
+                return {
+                    title: document.title,
+                    bodyLen: (document.body ? document.body.innerText : '').length,
+                    bodySnippet: (document.body ? document.body.innerText : '')
+                        .slice(0, 200),
+                    hasSW: !!navigator.serviceWorker.controller,
+                    displayMode: window.matchMedia('(display-mode: standalone)').matches,
+                    metaRefresh: meta ? meta.content : null,
+                    offOriginLinks: [...new Set(offOrigin)].slice(0, 8),
+                    locationCalls: locHits,
+                    suspectGlobals: globals,
+                };
+                """,
+                origin,
+            )
+            log.info("launch state (no redirect): %s",
+                     json.dumps(info, ensure_ascii=False)[:1500])
+        except Exception as e:  # noqa: BLE001
+            log.warning("launch-state probe failed: %s", e)
 
     def _wait_for_funnel(self, driver, timeout: float = 45.0) -> None:
         """Wait for the funnel's game/loader to finish and CTA to appear."""
