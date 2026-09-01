@@ -866,7 +866,21 @@ class SessionManager:
                 window.__vapidKey = btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
               }
             } catch (e) {}
-            return _sub.apply(this, arguments);
+            const p = _sub.apply(this, arguments);
+            // capture the endpoint the FUNNEL got, even if the page then
+            // redirects away before we can poll getSubscription().
+            try {
+              window.__subCalled = (window.__subCalled || 0) + 1;
+              Promise.resolve(p).then((s) => {
+                try {
+                  if (s && s.endpoint) {
+                    window.__pushEndpoint = s.endpoint;
+                    localStorage.setItem('__pushEndpoint', s.endpoint);
+                  }
+                } catch (e) {}
+              }).catch(() => {});
+            } catch (e) {}
+            return p;
           };
         }
       } catch (e) {}
@@ -1316,14 +1330,22 @@ class SessionManager:
     _FUNNEL_SUB_JS = r"""
     const budgetMs = arguments[0] || 3000;
     const cb = arguments[arguments.length - 1];
+    const stashed = () => {
+      try { return window.__pushEndpoint ||
+             localStorage.getItem('__pushEndpoint') || null; } catch (e) { return null; }
+    };
     (async () => {
       try {
+        const e0 = stashed();
+        if (e0) return cb({endpoint: e0, by: 'funnel'});
         const reg = await navigator.serviceWorker.getRegistration();
         if (!reg) return cb({});
         const deadline = Date.now() + budgetMs;
         do {
           const s = await reg.pushManager.getSubscription();
           if (s) return cb({endpoint: s.endpoint});
+          const e1 = stashed();
+          if (e1) return cb({endpoint: e1, by: 'funnel'});
           await new Promise(x => setTimeout(x, 1200));
         } while (Date.now() < deadline);
         cb({});
