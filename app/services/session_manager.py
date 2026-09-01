@@ -886,46 +886,77 @@ class SessionManager:
 
             driver.set_page_load_timeout(45)
             driver.set_script_timeout(12)
-            try:
-                driver.get(start_url)
-            except TimeoutException:
-                pass
+            norm = lambda u: (u or "").rstrip("/").split("#")[0]
 
-            last, stable = None, 0
-            final = start_url
-            for i in range(32):
-                if not out["push_endpoint"]:
-                    try:
-                        if origin_of(driver.current_url or "") == origin:
+            for rnd in range(2):
+                try:
+                    driver.get(start_url)
+                except TimeoutException:
+                    pass
+
+                last, stable = None, 0
+                final = start_url
+                for i in range(30):
+                    on_origin = origin_of(driver.current_url or "") == origin
+                    if not out["push_endpoint"] and on_origin:
+                        try:
                             r = driver.execute_async_script(self._QUICK_SUB_JS) or {}
                             if r.get("endpoint"):
-                                out["push_endpoint"] = r["endpoint"]
-                                out["push_subscribed"] = True
-                                log.info(
-                                    "pwa launch: push subscribed (%s) %s",
-                                    r.get("by"), r["endpoint"].split("/")[2],
-                                )
+                                out.update(push_subscribed=True, push_endpoint=r["endpoint"])
+                                log.info("pwa launch: push subscribed (%s) %s",
+                                         r.get("by"), r["endpoint"].split("/")[2])
+                        except Exception:
+                            pass
+                    time.sleep(1)
+                    try:
+                        cur = driver.current_url or ""
                     except Exception:
-                        pass
-                time.sleep(1)
-                try:
-                    cur = driver.current_url or ""
-                except Exception:
-                    break
-                if cur and not cur.startswith("about:"):
-                    final = cur
-                if cur == last:
-                    stable += 1
-                    if stable >= 3 and (out["push_endpoint"] or i >= 12):
                         break
-                else:
-                    stable, last = 0, cur
+                    if cur and not cur.startswith("about:"):
+                        final = cur
+                    redirected = norm(cur) not in ("", norm(start_url)) and \
+                        origin_of(cur) != origin
+                    if cur == last:
+                        stable += 1
+                        # redirected -> stop soon; only-subscribed -> give the
+                        # redirect ~18s more before giving up on it this round
+                        if stable >= 3 and (
+                            (redirected and i >= 5)
+                            or (out["push_endpoint"] and i >= 18)
+                        ):
+                            break
+                    else:
+                        stable, last = 0, cur
 
-            norm = lambda u: (u or "").rstrip("/").split("#")[0]
-            if norm(final) and norm(final) != norm(start_url):
-                out["deep_link"] = final
-                log.info("pwa deep link: %s", final)
-            else:
+                if norm(final) and norm(final) != norm(start_url):
+                    out["deep_link"] = final
+                    log.info("pwa deep link: %s", final)
+
+                # The funnel/SW may have subscribed while (or just after) it
+                # redirected us away. Check from a plain resource on the funnel
+                # origin — the SW registration + subscription persist regardless.
+                if not out["push_endpoint"]:
+                    try:
+                        driver.get(origin + "/favicon.ico")
+                        time.sleep(1.5)
+                        driver.set_script_timeout(25)
+                        r = driver.execute_async_script(self._SUBSCRIBE_JS, 18000) or {}
+                        driver.set_script_timeout(12)
+                        if r.get("endpoint"):
+                            out.update(push_subscribed=True, push_endpoint=r["endpoint"])
+                            log.info("pwa launch: push subscribed post-redirect (%s) %s",
+                                     r.get("by"), r["endpoint"].split("/")[2])
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("post-redirect sub check failed: %s", e)
+
+                have_deep = norm(out["deep_link"]) != norm(start_url)
+                if (out["push_endpoint"] and have_deep) or rnd == 1:
+                    break
+                log.info("pwa launch: retrying (deep=%s sub=%s)",
+                         have_deep, bool(out["push_endpoint"]))
+                time.sleep(2)
+
+            if norm(out["deep_link"]) == norm(start_url):
                 log.info("no redirect on PWA launch - deep link = start_url")
         except Exception as e:  # noqa: BLE001
             log.warning("pwa launch failed: %s", e)
