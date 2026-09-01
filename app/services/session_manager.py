@@ -349,6 +349,173 @@ class SessionManager:
             except Exception:
                 pass
 
+    async def probe_offer(self, chat_id: int, proxy: dict | None, url: str) -> None:
+        """Full diagnostic dump for one offer URL — what the proxy exit looks
+        like, what the cloaker returns over N loads (HTTP + browser), and what
+        the standalone launch resolves. Sends a report + screenshot to chat_id.
+        For comparing a funnel that passes against one that does not."""
+        profile_dir = str(
+            (Path(self.s.sessions_dir) / ("_probe_" + uuid.uuid4().hex)).resolve()
+        )
+        os.makedirs(profile_dir, exist_ok=True)
+        local_proxy = driver = None
+        lines: list[str] = [f"🔬 <b>Probe</b> {esc(url)}"]
+        shot = str(Path(profile_dir, "probe.png").resolve())
+
+        def _http_probe(proxy_url: str | None) -> str:
+            import requests
+            px = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            try:
+                r = requests.get(url, proxies=px, timeout=30,
+                                 allow_redirects=True)
+            except Exception as e:  # noqa: BLE001
+                return f"HTTP: ошибка {e}"
+            h = r.headers
+            m = re.search(r"<title[^>]*>(.*?)</title>", r.text or "",
+                          re.I | re.S)
+            has_mani = bool(re.search(
+                r'rel=["\']?[^"\'>]*manifest', r.text or "", re.I))
+            cookies = ",".join(c.name for c in r.cookies) or "—"
+            return (
+                f"HTTP: {r.status_code} → {esc(r.url)}\n"
+                f"  server={esc(h.get('server','—'))} "
+                f"cf-ray={esc(h.get('cf-ray','—'))} "
+                f"cf-mitigated={esc(h.get('cf-mitigated','—'))}\n"
+                f"  content-type={esc(h.get('content-type','—'))} "
+                f"len={len(r.text or '')} manifest={has_mani}\n"
+                f"  set-cookie={esc(cookies)}\n"
+                f"  <title>={esc((m.group(1).strip() if m else '')[:80])}"
+            )
+
+        try:
+            proxy_url = None
+            if proxy:
+                local_proxy = LocalProxy(pproxy_upstream(proxy))
+                proxy_url = await local_proxy.start()
+
+            geo = None
+            if proxy_url:
+                geo = await asyncio.to_thread(self._probe_geo_http, proxy_url)
+            g = geo or {}
+            lines.append(
+                f"\n<b>Прокси</b>: {esc(proxy.get('name') if proxy else 'без прокси')}\n"
+                f"  exit ip={esc(g.get('ip') or '?')} "
+                f"cc={esc(g.get('country_code') or '?')} "
+                f"isp={esc(g.get('isp') or '?')}\n"
+                f"  mobile={g.get('mobile')} hosting={g.get('hosting')} "
+                f"proxy={g.get('proxy')} tz={esc(g.get('timezone') or '?')}"
+            )
+
+            lines.append("\n<b>HTTP-проба</b> (без браузера):")
+            lines.append(await asyncio.to_thread(_http_probe, proxy_url))
+
+            driver = await asyncio.to_thread(
+                self._setup_undetected_driver, profile_dir, proxy_url, geo
+            )
+
+            def work() -> None:
+                self._apply_stealth(driver, geo)
+                lines.append("\n<b>Браузер</b> (до 3 загрузок):")
+                for attempt in range(1, 4):
+                    if attempt > 1:
+                        try:
+                            driver.delete_all_cookies()
+                        except Exception:
+                            pass
+                        time.sleep(2)
+                    try:
+                        driver.get(url)
+                    except TimeoutException:
+                        pass
+                    time.sleep(3)
+                    cur = title = body = ""
+                    try:
+                        cur = driver.current_url or ""
+                    except Exception:
+                        pass
+                    try:
+                        title = driver.title or ""
+                    except Exception:
+                        pass
+                    try:
+                        body = driver.execute_script(
+                            "return document.body?document.body.innerText:''") or ""
+                    except Exception:
+                        pass
+                    mani, murl = {}, None
+                    try:
+                        murl = driver.execute_script(
+                            "var l=document.querySelector('link[rel~=\"manifest\"]');"
+                            "return l?l.href:null;")
+                        if murl:
+                            import requests
+                            mani = requests.get(murl, timeout=12).json()
+                    except Exception:
+                        pass
+                    blocked = self._looks_blocked(title, body)
+                    lines.append(
+                        f"  [{attempt}] url={esc(cur)}\n"
+                        f"      title={esc(title[:70])} bodyLen={len(body)} "
+                        f"blocked={blocked}\n"
+                        f"      manifest={'да' if mani else 'нет'}"
+                        + (f" name={esc(str(mani.get('name')))} "
+                           f"start_url={esc(str(mani.get('start_url')))}"
+                           if mani else "")
+                    )
+                    if mani and not blocked:
+                        base = cur if cur.startswith("http") else url
+                        start_url = urljoin(
+                            murl or base, mani.get("start_url") or "/")
+                        try:
+                            self._auto_funnel_interaction_sync(driver)
+                        except Exception as e:  # noqa: BLE001
+                            lines.append(f"  interaction: {esc(str(e))}")
+                        launch = self._launch_pwa(driver, start_url, link_only=True)
+                        lines.append(
+                            f"\n<b>Launch</b>: start_url={esc(start_url)}\n"
+                            f"  deep_link={esc(launch['deep_link'])}\n"
+                            f"  {'✅ редирект пойман' if launch['deep_link'] != start_url else '⚠️ редиректа нет — deep_link = start_url'}"
+                        )
+                        try:
+                            driver.save_screenshot(shot)
+                        except Exception:
+                            pass
+                        return
+                lines.append("\n⚠️ Ни одна загрузка не дала воронку с manifest — "
+                             "клоака отдаёт заглушку.")
+                try:
+                    driver.save_screenshot(shot)
+                except Exception:
+                    pass
+
+            await asyncio.to_thread(work)
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"\n❌ Ошибка: {esc(str(e))}")
+        finally:
+            if driver:
+                try:
+                    await asyncio.to_thread(driver.quit)
+                except Exception:
+                    pass
+            if local_proxy:
+                await local_proxy.stop()
+
+        text = "\n".join(lines)
+        for i in range(0, len(text), 3900):
+            await self.bot.send_message(chat_id, text[i:i + 3900],
+                                        disable_web_page_preview=True)
+        try:
+            if Path(shot).exists():
+                await self.bot.send_photo(chat_id, FSInputFile(shot),
+                                          caption="landing / launch")
+        except Exception as e:  # noqa: BLE001
+            log.warning("probe screenshot send failed: %s", e)
+        try:
+            import shutil
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        except Exception:
+            pass
+
     async def open_site(
         self, user_id: int, chat_id: int, proxy: dict | None, url: str
     ) -> InspectResult:
