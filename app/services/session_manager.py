@@ -1366,6 +1366,18 @@ class SessionManager:
         push_by = "funnel" if early["subscribed"] else launch.get("push_by")
         installable = bool(early["sw"]) or push_subscribed
 
+        # VAPP funnels (newlifejoker.club family): the pwa_<uuid> HTML carries
+        # <meta va_app_public_key> + <meta user_id>. The Vue app redirects to
+        # the casino before it can subscribe, but we don't need it to — do the
+        # subscribe ourselves with that key and POST it to /subscribe exactly
+        # like their VappWorker/PwaWorker do.
+        if not push_subscribed and manifest:
+            va = self._vapp_subscribe(driver, start_url)
+            if va.get("endpoint"):
+                push_subscribed = True
+                push_endpoint = va["endpoint"]
+                push_by = "funnel"
+
         # The push prompt is shown by an intermediate "PWA service" domain
         # (e.g. yapegamenew.club) that sits between the funnel and the casino
         # and flashes past too fast on launch. Revisit it and let it subscribe.
@@ -1431,6 +1443,114 @@ class SessionManager:
       } catch (e) {}
     })();
     """
+
+    _VAPP_SUB_JS = r"""
+    const startUrl = arguments[0];
+    const cb = arguments[arguments.length - 1];
+    const b64u = (k) => {
+      const pad = '='.repeat((4 - k.length % 4) % 4);
+      const s = (k + pad).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(s);
+      const a = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) a[i] = raw.charCodeAt(i);
+      return a;
+    };
+    (async () => {
+      try {
+        // the pwa_<uuid> HTML carries the push config in <meta> tags
+        const html = await fetch(startUrl, {credentials: 'include'})
+          .then(r => r.text());
+        const meta = (n) => {
+          const m = html.match(
+            new RegExp('<meta[^>]+name=["\']' + n + '["\'][^>]+content=["\']([^"\']+)'));
+          return m ? m[1] : (document.querySelector('meta[name="' + n + '"]') || {}).content;
+        };
+        const key = meta('va_app_public_key');
+        const uid = meta('user_id');
+        const vaid = meta('va_app_id');
+        if (!key) return cb({err: 'no va_app_public_key in ' + startUrl});
+
+        const lang = navigator.language || 'es';
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+        // persist pushConfig so VappWorker's pushsubscriptionchange can re-sub
+        try {
+          const db = await new Promise((res, rej) => {
+            const q = indexedDB.open('pushConfigDB', 1);
+            q.onupgradeneeded = () => q.result.createObjectStore(
+              'config', {keyPath: 'key'});
+            q.onsuccess = () => res(q.result);
+            q.onerror = () => rej(q.error);
+          });
+          await new Promise((res) => {
+            const tx = db.transaction('config', 'readwrite');
+            tx.objectStore('config').put({
+              key: 'pushConfig', va_app_public_key: key,
+              hostname: location.hostname, user_id: uid,
+              language: lang, timezone: tz,
+            });
+            tx.oncomplete = res; tx.onerror = res;
+          });
+        } catch (e) {}
+
+        const reg = await navigator.serviceWorker.register(
+          '/push/vapp/VappWorker.js');
+        let active = reg.active;
+        for (let i = 0; i < 30 && !active; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          const r2 = await navigator.serviceWorker.getRegistration();
+          active = r2 && r2.active;
+        }
+        const ready = await navigator.serviceWorker.ready;
+        let sub = await ready.pushManager.getSubscription();
+        if (!sub) sub = await ready.pushManager.subscribe({
+          userVisibleOnly: true, applicationServerKey: b64u(key),
+        });
+        const body = JSON.stringify(sub);
+        const res = await fetch('/subscribe', {
+          method: 'POST', credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'cf-ew-wai': uid || '',
+            'cf-l-wai': lang, 'cf-tz-wai': tz,
+          },
+          body,
+        });
+        cb({endpoint: sub.endpoint, posted: res.status, uid: uid, vaid: vaid});
+      } catch (e) { cb({err: String(e)}); }
+    })();
+    """
+
+    def _vapp_subscribe(self, driver, start_url: str) -> dict:
+        """Self-subscribe using the VAPID key the funnel ships in its pwa_<uuid>
+        HTML <meta>, and POST the subscription to /subscribe like the funnel's
+        own VappWorker would. Works from the stable funnel landing page (same
+        origin) — no need to sit on the redirecting pwa_ page."""
+        out = {"endpoint": None}
+        origin = origin_of(start_url)
+        try:
+            if origin_of(driver.current_url or "") != origin:
+                driver.get(origin + "/")
+                time.sleep(2)
+            try:
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {"origin": origin, "permissions": ["notifications"]})
+            except Exception:
+                pass
+            driver.set_script_timeout(45)
+            r = driver.execute_async_script(self._VAPP_SUB_JS, start_url) or {}
+            driver.set_script_timeout(20)
+            if r.get("endpoint"):
+                out["endpoint"] = r["endpoint"]
+                log.info("vapp subscribe: OK ep=%s posted=%s uid=%s",
+                         r["endpoint"].split("/")[2], r.get("posted"),
+                         r.get("uid"))
+            else:
+                log.info("vapp subscribe: %s", r.get("err"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("vapp subscribe failed: %s", e)
+        return out
 
     def _subscribe_on_intermediate(self, driver, funnel_start: str,
                                    chain: list) -> dict:
@@ -2362,6 +2482,14 @@ class SessionManager:
         # Retry unless we already have a FUNNEL-made subscription (a self-made
         # one is never registered with the funnel's backend, so it gets no
         # pushes — keep trying for a real one).
+        if sess.get("push_by") != "funnel":
+            # VAPP funnels: subscribe with the key from the pwa_ HTML meta
+            va = await asyncio.to_thread(
+                self._vapp_subscribe, driver, sess["start_url"])
+            if va.get("endpoint"):
+                sess.update(push_subscribed=True, push_endpoint=va["endpoint"],
+                            push_by="funnel")
+
         if sess.get("push_by") != "funnel":
             sub = await asyncio.to_thread(
                 self._subscribe_push, driver, sess["start_url"], 30000, True
