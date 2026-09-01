@@ -219,71 +219,83 @@ class SessionManager:
                 self._setup_undetected_driver, profile_dir, proxy_url, geo
             )
 
-            def work():
-                self._apply_stealth(driver, geo)
-                try:
-                    driver.get(url)
-                except TimeoutException:
-                    pass
-                time.sleep(3)
-                src = ""
-                try:
-                    src = driver.page_source or ""
-                except Exception:
-                    pass
-                cur = ""
-                try:
-                    cur = driver.current_url or ""
-                except Exception:
-                    pass
-                if self._looks_like_error_page(cur, src):
-                    raise RuntimeError("сайт не открылся через прокси")
-                title = ""
-                try:
-                    title = driver.title or ""
-                except Exception:
-                    pass
-                if self._looks_blocked(title, src) or self._looks_blocked(
-                    title, driver.execute_script(
-                        "return document.body?document.body.innerText:''") or ""):
-                    hint = "проверь гео прокси"
-                    if (geo or {}).get("hosting") and not (geo or {}).get("mobile"):
-                        hint = (
-                            f"выходной IP {geo.get('ip')} ({geo.get('isp')}) — "
-                            "дата-центр, нужна мобильная/резидентная прокси"
-                        )
-                    raise RuntimeError(f"клоака отдала декой ({hint})")
-
-                manifest, murl = {}, None
-                try:
-                    murl = driver.execute_script(
-                        "var l=document.querySelector('link[rel~=\"manifest\"]');"
-                        "return l?l.href:null;"
+            def _dc_hint() -> str:
+                if (geo or {}).get("hosting") and not (geo or {}).get("mobile"):
+                    return (
+                        f"выходной IP {geo.get('ip')} ({geo.get('isp')}) — "
+                        "дата-центр, нужна мобильная/резидентная прокси"
                     )
-                    if murl:
-                        import requests
+                return "гео/трек-параметры под оффер"
 
-                        manifest = requests.get(murl, timeout=12).json()
-                except Exception:
-                    pass
-
-                body_txt = ""
-                try:
+            def _load_past_cloaker():
+                """Load url, retrying on a decoy response — the cloaker verdict
+                is not stable, a reload often gets through."""
+                last_title = ""
+                for attempt in range(1, 4):
+                    if attempt > 1:
+                        try:
+                            driver.delete_all_cookies()
+                        except Exception:
+                            pass
+                        time.sleep(2)
+                    try:
+                        driver.get(url)
+                    except TimeoutException:
+                        pass
+                    time.sleep(3)
+                    src = cur = title = ""
+                    try:
+                        src = driver.page_source or ""
+                    except Exception:
+                        pass
+                    try:
+                        cur = driver.current_url or ""
+                    except Exception:
+                        pass
+                    try:
+                        title = driver.title or ""
+                    except Exception:
+                        pass
+                    last_title = title or last_title
+                    if self._looks_like_error_page(cur, src):
+                        raise RuntimeError("сайт не открылся через прокси")
                     body_txt = driver.execute_script(
                         "return document.body?document.body.innerText:''") or ""
-                except Exception:
-                    pass
-                if not manifest and len(body_txt.strip()) < 20:
-                    hint = "гео/трек-параметры под оффер"
-                    if (geo or {}).get("hosting") and not (geo or {}).get("mobile"):
-                        hint = (
-                            f"выходной IP {geo.get('ip')} ({geo.get('isp')}) — "
-                            "дата-центр, нужна мобильная/резидентная прокси"
-                        )
-                    raise RuntimeError(
-                        f"воронка вернула пустую страницу — декой клоаки "
-                        f"({hint}); title={title!r}"
+                    blocked = (
+                        self._looks_blocked(title, src)
+                        or self._looks_blocked(title, body_txt)
                     )
+
+                    manifest, murl = {}, None
+                    try:
+                        murl = driver.execute_script(
+                            "var l=document.querySelector('link[rel~=\"manifest\"]');"
+                            "return l?l.href:null;"
+                        )
+                        if murl:
+                            import requests
+
+                            manifest = requests.get(murl, timeout=12).json()
+                    except Exception:
+                        pass
+
+                    decoy = blocked or (
+                        not manifest and len(body_txt.strip()) < 20
+                    )
+                    if not decoy:
+                        return cur, title, manifest, murl
+                    log.info(
+                        "offer-link scan: decoy on attempt %d (title=%r) — retrying",
+                        attempt, title,
+                    )
+                raise RuntimeError(
+                    f"воронка вернула пустую страницу — декой клоаки "
+                    f"({_dc_hint()}); title={last_title!r}"
+                )
+
+            def work():
+                self._apply_stealth(driver, geo)
+                cur, title, manifest, murl = _load_past_cloaker()
 
                 base = cur if cur.startswith("http") else url
                 start_url = urljoin(base, "/")
