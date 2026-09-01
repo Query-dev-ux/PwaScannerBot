@@ -1494,16 +1494,12 @@ class SessionManager:
         } catch (e) {}
 
         const reg = await navigator.serviceWorker.register(
-          '/push/vapp/VappWorker.js');
-        let active = reg.active;
-        for (let i = 0; i < 30 && !active; i++) {
+          '/push/vapp/VappWorker.js', {scope: '/push/vapp/'});
+        for (let i = 0; i < 40 && !reg.active; i++)
           await new Promise(r => setTimeout(r, 500));
-          const r2 = await navigator.serviceWorker.getRegistration();
-          active = r2 && r2.active;
-        }
-        const ready = await navigator.serviceWorker.ready;
-        let sub = await ready.pushManager.getSubscription();
-        if (!sub) sub = await ready.pushManager.subscribe({
+        if (!reg.active) return cb({err: 'VappWorker did not activate'});
+        let sub = await reg.pushManager.getSubscription();
+        if (!sub) sub = await reg.pushManager.subscribe({
           userVisibleOnly: true, applicationServerKey: b64u(key),
         });
         const body = JSON.stringify(sub);
