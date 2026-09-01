@@ -612,6 +612,7 @@ class SessionManager:
                 "start_url": start_url,
                 "scope": scope,
                 "deep_link": deep_link,
+                "nav_chain": info.get("nav_chain") or [],
                 "profile_dir": profile_dir,
                 "scanned_at": time.time(),
                 "collecting": False,
@@ -1241,10 +1242,21 @@ class SessionManager:
             # the push subscription (fake-store funnels only subscribe here).
             launch = self._launch_pwa(driver, start_url)
         deep_link = launch["deep_link"]
+        nav_chain = launch.get("chain") or []
         push_subscribed = early["subscribed"] or launch["push_subscribed"]
         push_endpoint = early["endpoint"] or launch["push_endpoint"]
         push_by = "funnel" if early["subscribed"] else launch.get("push_by")
         installable = bool(early["sw"]) or push_subscribed
+
+        # The push prompt is shown by an intermediate "PWA service" domain
+        # (e.g. yapegamenew.club) that sits between the funnel and the casino
+        # and flashes past too fast on launch. Revisit it and let it subscribe.
+        if not push_subscribed and len(nav_chain) > 1:
+            mid = self._subscribe_on_intermediate(driver, start_url, nav_chain)
+            if mid.get("endpoint"):
+                push_subscribed = True
+                push_endpoint = mid["endpoint"]
+                push_by = "funnel"
 
         # Park the main tab back on the funnel origin so a later attempt has SW
         # context without re-triggering the cloaker.
@@ -1272,11 +1284,107 @@ class SessionManager:
             "name": name,
             "scope": scope,
             "deep_link": deep_link,
+            "nav_chain": nav_chain,
             "push_subscribed": push_subscribed,
             "push_endpoint": push_endpoint,
             "push_by": push_by,
             "shell": shell,
         }
+
+    _FREEZE_JS = r"""
+    (() => {
+      try {
+        const L = window.location;
+        try { L.assign = () => {}; } catch (e) {}
+        try { L.replace = () => {}; } catch (e) {}
+        try {
+          const p = Object.getPrototypeOf(L);
+          const d = Object.getOwnPropertyDescriptor(p, 'href');
+          if (d && d.configurable) Object.defineProperty(p, 'href', {
+            configurable: true, enumerable: true, get: d.get, set() {},
+          });
+        } catch (e) {}
+        const strip = () => document
+          .querySelectorAll('meta[http-equiv="refresh" i]')
+          .forEach(m => m.remove());
+        strip();
+        new MutationObserver(strip).observe(
+          document.documentElement, {childList: true, subtree: true});
+      } catch (e) {}
+    })();
+    """
+
+    def _subscribe_on_intermediate(self, driver, funnel_start: str,
+                                   chain: list) -> dict:
+        """Visit each non-funnel, non-final domain in the launch chain, freeze
+        its onward redirect, grant notifications, and wait for it to subscribe.
+        That middle domain is the PWA service that actually owns the push."""
+        out = {"endpoint": None}
+        f_org = origin_of(funnel_start)
+        final_org = origin_of(chain[-1]) if chain else ""
+        mids, seen = [], set()
+        for u in chain:
+            o = origin_of(u)
+            if o and o not in (f_org, final_org) and o not in seen:
+                seen.add(o)
+                mids.append(u)
+        if not mids:
+            return out
+        log.info("push: revisiting intermediate domain(s): %s",
+                 [origin_of(u) for u in mids])
+        for u in mids:
+            org = origin_of(u)
+            freeze_id = None
+            try:
+                driver.execute_cdp_cmd("Network.enable", {})
+                driver.execute_cdp_cmd(
+                    "Network.setBlockedURLs",
+                    {"urls": ["*/casino*", "*newline*",
+                              f"*{final_org.split('//')[-1]}*"]})
+                res = driver.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": self._STEALTH_JS + "\n" + self._FREEZE_JS})
+                freeze_id = (res or {}).get("identifier")
+                try:
+                    driver.get(u)
+                except TimeoutException:
+                    pass
+                try:
+                    driver.execute_script(self._FREEZE_JS)
+                except Exception:
+                    pass
+                try:
+                    driver.execute_cdp_cmd(
+                        "Browser.grantPermissions",
+                        {"origin": org, "permissions": ["notifications"]})
+                except Exception:
+                    pass
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    r = self._subscribe_push(driver, u, budget_ms=6000)
+                    if r.get("subscribed") and r.get("endpoint"):
+                        out["endpoint"] = r["endpoint"]
+                        log.info("push: intermediate %s subscribed (%s)",
+                                 org, r["endpoint"].split("/")[2])
+                        return out
+                    time.sleep(2)
+                log.info("push: intermediate %s did not subscribe", org)
+            except Exception as e:  # noqa: BLE001
+                log.warning("intermediate subscribe (%s) failed: %s", org, e)
+            finally:
+                try:
+                    driver.execute_cdp_cmd(
+                        "Network.setBlockedURLs", {"urls": []})
+                except Exception:
+                    pass
+                if freeze_id:
+                    try:
+                        driver.execute_cdp_cmd(
+                            "Page.removeScriptToEvaluateOnNewDocument",
+                            {"identifier": freeze_id})
+                    except Exception:
+                        pass
+        return out
 
     _SUBSCRIBE_JS = r"""
     const budgetMs = arguments[0] || 15000;
@@ -1431,7 +1539,7 @@ class SessionManager:
         shot_path: if set, screenshot the launch tab (the deep-link page)
         right before it's closed."""
         out = {"deep_link": start_url, "push_subscribed": False,
-               "push_endpoint": None, "push_by": None}
+               "push_endpoint": None, "push_by": None, "chain": []}
         if not str(start_url).lower().startswith(("http://", "https://")):
             log.warning("pwa launch: bad start_url %r", start_url)
             return out
@@ -1516,6 +1624,7 @@ class SessionManager:
             # start_url. Now both modes wait out the chain; we only stop early
             # once we've actually landed somewhere other than start_url.
             last, stable, final = None, 0, start_url
+            chain = [start_url]
             for i in range(24):
                 if not link_only:
                     _funnel_sub(2500)
@@ -1541,7 +1650,14 @@ class SessionManager:
                 else:
                     if cur != start_url:
                         log.info("pwa launch nav [%d]: %s", i, cur)
+                    if cur and not cur.startswith("about:") and (
+                            not chain or origin_of(cur) != origin_of(chain[-1])):
+                        chain.append(cur)
                     stable, last = 0, cur
+            out["chain"] = chain
+            if len(chain) > 2:
+                log.info("pwa launch chain: %s",
+                         " -> ".join(origin_of(u) for u in chain))
 
             if norm(final) and norm(final) != norm(start_url):
                 out["deep_link"] = final
@@ -2008,7 +2124,7 @@ class SessionManager:
             except Exception as e:  # noqa: BLE001
                 log.warning("relaunch interaction failed: %s", e)
 
-            deadline = time.time() + 50
+            deadline = time.time() + 40
             while time.time() < deadline:
                 r = self._subscribe_push(driver, start_url, budget_ms=8000)
                 if r.get("subscribed") and r.get("endpoint"):
@@ -2025,6 +2141,15 @@ class SessionManager:
                 except Exception:
                     pass
                 time.sleep(3)
+
+            # the push-owning domain is usually an intermediate hop (the PWA
+            # service that shows the prompt), not start_url or the casino
+            if not out["subscribed"]:
+                mid = self._subscribe_on_intermediate(
+                    driver, start_url, sess.get("nav_chain") or [])
+                if mid.get("endpoint"):
+                    out.update(subscribed=True, endpoint=mid["endpoint"])
+
             if not out["subscribed"]:
                 log.info("installed-PWA relaunch: still no subscription")
         except Exception as e:  # noqa: BLE001
