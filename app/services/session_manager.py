@@ -786,12 +786,66 @@ class SessionManager:
 
     _STEALTH_JS = """
     (() => {
-      try { Object.defineProperty(navigator, 'webdriver', {get: () => false}); } catch (e) {}
-      // real Android reports a touchscreen
-      try { Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5}); } catch (e) {}
+      // make a spoofed getter/function read back as native code, so a cloaker
+      // probing `fn.toString()` / descriptor.get.toString() can't tell.
+      const nativeStr = (name) => 'function ' + name + '() { [native code] }';
+      const mask = (obj, name, fn) => {
+        try {
+          Object.defineProperty(fn, 'toString', {
+            value: () => nativeStr(name), writable: true, configurable: true,
+          });
+        } catch (e) {}
+        return fn;
+      };
+      const defGet = (obj, prop, val, name) => {
+        try {
+          const g = mask(obj, name || ('get ' + prop), () => val);
+          Object.defineProperty(obj, prop, {get: g, configurable: true});
+        } catch (e) {}
+      };
+
+      defGet(navigator, 'webdriver', false, 'get webdriver');
+      // real Android reports a touchscreen + a real core/RAM count
+      defGet(navigator, 'maxTouchPoints', 5, 'get maxTouchPoints');
+      defGet(navigator, 'hardwareConcurrency', 8, 'get hardwareConcurrency');
+      defGet(navigator, 'deviceMemory', 8, 'get deviceMemory');
+      try {
+        defGet(navigator, 'connection', {
+          effectiveType: '4g', rtt: 100, downlink: 10,
+          saveData: false, type: 'cellular',
+        }, 'get connection');
+      } catch (e) {}
+
+      // WebGL: headless Chrome renders through SwiftShader — a dead giveaway.
+      // Report the Pixel 7's GPU (ARM Mali-G710) instead.
+      try {
+        const GL_VENDOR = 0x9245, GL_RENDERER = 0x9246;
+        const spoof = {
+          [GL_VENDOR]: 'ARM',
+          [GL_RENDERER]: 'ANGLE (ARM, Mali-G710, OpenGL ES 3.2)',
+        };
+        for (const proto of [
+          window.WebGLRenderingContext && WebGLRenderingContext.prototype,
+          window.WebGL2RenderingContext && WebGL2RenderingContext.prototype,
+        ]) {
+          if (!proto) continue;
+          const orig = proto.getParameter;
+          proto.getParameter = mask(proto, 'getParameter', function (p) {
+            if (p in spoof) return spoof[p];
+            return orig.call(this, p);
+          });
+        }
+      } catch (e) {}
+
       try {
         if (!window.chrome) window.chrome = {};
         if (!window.chrome.runtime) window.chrome.runtime = {};
+        if (!window.chrome.app) window.chrome.app = {
+          isInstalled: false, InstallState: {}, RunningState: {},
+        };
+        if (!window.chrome.csi) window.chrome.csi = function () { return {}; };
+        if (!window.chrome.loadTimes) window.chrome.loadTimes =
+          function () { return {}; };
       } catch (e) {}
       try {
         const q = window.navigator.permissions && window.navigator.permissions.query;
