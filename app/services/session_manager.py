@@ -2058,6 +2058,42 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("install prompt trigger failed: %s", e)
 
+    def _dump_funnel_logic(self, driver, origin: str) -> None:
+        """Log the funnel's page/SW JS around the push/standalone gate, so we
+        can see what signal it checks to decide 'subscribe' vs 'redirect'."""
+        try:
+            info = driver.execute_async_script(r"""
+              const cb = arguments[arguments.length - 1];
+              const KW = /(pushManager|subscribe|Notification|requestPermission|standalone|display-mode|getInstalledRelatedApps|referrer|matchMedia|navigator\.standalone)/;
+              const grab = (t) => (t || '').split('\n')
+                .filter(l => KW.test(l)).map(l => l.trim().slice(0, 200)).slice(0, 25);
+              const out = {inline: [], srcs: [], sw: null};
+              for (const s of document.scripts) {
+                if (s.src) out.srcs.push(s.src);
+                else out.inline.push(...grab(s.textContent));
+              }
+              (async () => {
+                try {
+                  const reg = await navigator.serviceWorker.getRegistration();
+                  const u = reg && (reg.active||reg.installing||reg.waiting);
+                  if (u && u.scriptURL) {
+                    out.swUrl = u.scriptURL;
+                    const t = await fetch(u.scriptURL).then(r=>r.text()).catch(()=>'');
+                    out.sw = grab(t);
+                  }
+                } catch (e) {}
+                cb(out);
+              })();
+            """) or {}
+            log.info("funnel logic: srcs=%s", (info.get("srcs") or [])[:8])
+            for l in (info.get("inline") or [])[:20]:
+                log.info("funnel inline: %s", l)
+            log.info("funnel SW: url=%s", info.get("swUrl"))
+            for l in (info.get("sw") or [])[:20]:
+                log.info("funnel sw-js: %s", l)
+        except Exception as e:  # noqa: BLE001
+            log.warning("funnel logic dump failed: %s", e)
+
     def _reopen_as_installed_pwa(self, sess: dict) -> dict:
         """Quit the scan driver and relaunch it in Chrome --app mode on the PWA
         start_url — a REAL standalone context. Funnels that only arm push from
@@ -2080,9 +2116,14 @@ class SessionManager:
                 except Exception:
                     pass
             time.sleep(1)
+            # fresh profile so the funnel's SW registers from scratch — its
+            # subscribe() may live in the SW install/activate handler, which
+            # never re-fires against the profile that already has the SW.
+            fresh = sess["profile_dir"] + "_app"
             driver = self._setup_undetected_driver(
-                sess["profile_dir"], proxy_url, geo, app_url=start_url)
+                fresh, proxy_url, geo, app_url=start_url)
             sess["driver"] = driver
+            sess["profile_dir_app"] = fresh
             self._apply_stealth(driver, geo)
             # Block the casino redirect (server-side 302, rotating newlineNNNN
             # domain) so the pwa_ page stays put long enough to register its SW
@@ -2113,10 +2154,12 @@ class SessionManager:
                     "return {dm: matchMedia('(display-mode: standalone)').matches,"
                     " sa: navigator.standalone, bip: window.__bipFired||false,"
                     " ctrl: !!navigator.serviceWorker.controller,"
+                    " ref: document.referrer, subCalls: window.__subCalled||0,"
                     " url: location.href};") or {}
                 log.info("installed-PWA relaunch state: %s", d)
             except Exception:
                 pass
+            self._dump_funnel_logic(driver, origin)
             # run the funnel's own install/CTA flow with trusted clicks — in a
             # real standalone window some funnels only then call subscribe()
             try:
