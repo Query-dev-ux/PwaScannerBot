@@ -149,6 +149,14 @@ class SessionManager:
             "--force-webrtc-ip-handling-policy=default_public_interface_only"
         )
         chrome_options.add_argument("--disable-features=WebRtcHideLocalIpsWithMdns")
+        # keep the footprint small — sessions hold a live Chrome for 7 days.
+        # NB: do NOT disable background networking — FCM push rides on it.
+        chrome_options.add_argument("--renderer-process-limit=2")
+        chrome_options.add_argument("--js-flags=--max-old-space-size=192")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-sync")
+        chrome_options.add_argument("--disable-breakpad")
+        chrome_options.add_argument("--no-first-run")
 
         # Containers / running as root: Chrome refuses the sandbox, and /dev/shm
         # is usually tiny.
@@ -2605,6 +2613,9 @@ class SessionManager:
             raise RuntimeError("Неизвестная стадия")
         sess["stage"] = stage
         await self.db.set_session_fields(session_id, stage=stage)
+        # after deposit there's no more manual interaction — free the page RAM
+        if stage == STAGE_DEPOSIT:
+            await asyncio.to_thread(self._park_session, sess)
         # drop a marker into the push stream so the pack shows the transition
         sess["push_queue"].append(
             {
@@ -2745,7 +2756,31 @@ class SessionManager:
         sess = self._sessions.get(session_id)
         if not sess:
             raise RuntimeError("Сессия не активна (браузер закрыт)")
+        if sess.pop("parked", False):
+            # unpark: the user wants to interact again
+            try:
+                sess["driver"].get(sess.get("deep_link") or sess["start_url"])
+                time.sleep(1)
+            except Exception as e:  # noqa: BLE001
+                log.warning("unpark failed: %s", e)
         return sess
+
+    def _park_session(self, sess: dict) -> None:
+        """Point the tab at about:blank to free the casino page's memory. The
+        push subscription + SW live in the profile and wake on push
+        independently of any open page, and the CDP observer is browser-level."""
+        if sess.get("parked"):
+            return
+        try:
+            cur = sess["driver"].current_url or ""
+            if cur.startswith("about:"):
+                sess["parked"] = True
+                return
+            sess["driver"].get("about:blank")
+            sess["parked"] = True
+            log.info("session %s parked (tab -> about:blank)", sess["id"][:8])
+        except Exception as e:  # noqa: BLE001
+            log.warning("park failed: %s", e)
 
     async def finalize_expired(self) -> None:
         """Finalize and deliver expired sessions."""
