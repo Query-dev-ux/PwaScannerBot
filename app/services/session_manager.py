@@ -1688,6 +1688,37 @@ class SessionManager:
             time.sleep(2)
         log.info("funnel wait timed out (%.0fs) - proceeding anyway", timeout)
 
+    def _click_trusted(self, driver, element) -> bool:
+        """Click via CDP Input so the event carries transient user activation —
+        untrusted el.click() from execute_script does NOT, and funnels gate
+        pushManager.subscribe() / requestPermission() behind a real gesture."""
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", element)
+            time.sleep(0.2)
+            box = driver.execute_script(
+                "const r=arguments[0].getBoundingClientRect();"
+                "return {x:r.left+r.width/2, y:r.top+r.height/2,"
+                " ok:r.width>0&&r.height>0};", element)
+            if not box or not box.get("ok"):
+                return False
+            x, y = float(box["x"]), float(box["y"])
+            for ev in ("mouseMoved", "mousePressed", "mouseReleased"):
+                p = {"type": ev, "x": x, "y": y, "button": "left",
+                     "buttons": 1, "clickCount": 1}
+                if ev == "mouseMoved":
+                    p["button"], p["buttons"], p["clickCount"] = "none", 0, 0
+                driver.execute_cdp_cmd("Input.dispatchMouseEvent", p)
+                time.sleep(0.05)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("trusted click failed: %s", e)
+            try:
+                element.click()  # selenium native (also trusted)
+                return True
+            except Exception:
+                return False
+
     def _auto_funnel_interaction_sync(self, driver) -> None:
         """Automatically interact with PWA installation funnel (synchronous, blocking)."""
         try:
@@ -1721,13 +1752,10 @@ class SessionManager:
                 )
 
                 if wheel_el:
-                    log.info("found wheel button, spinning 15 times")
-                    for i in range(15):
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView();arguments[0].click();",
-                            wheel_el,
-                        )
-                        time.sleep(random.uniform(0.2, 0.6))
+                    log.info("found wheel button, spinning (trusted clicks)")
+                    for i in range(8):
+                        self._click_trusted(driver, wheel_el)
+                        time.sleep(random.uniform(0.3, 0.7))
                     time.sleep(random.uniform(1.5, 2.5))
             except Exception as e:
                 log.warning("wheel interaction failed: %s", e)
@@ -1753,12 +1781,14 @@ class SessionManager:
                 )
 
                 if install_el:
-                    log.info("found install button, clicking")
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView();arguments[0].click();",
-                        install_el,
-                    )
+                    log.info("found install button, clicking (trusted)")
+                    self._click_trusted(driver, install_el)
                     time.sleep(random.uniform(1.5, 2.5))
+                    # a funnel that subscribes on this gesture fires subscribe()
+                    # now — give it a beat, then the caller's _subscribe_push /
+                    # _funnel_sub picks up __vapidKey / the endpoint.
+                    driver.execute_script(
+                        "try{window.__afterInstallClick=Date.now();}catch(e){}")
             except Exception as e:
                 log.warning("install button interaction failed: %s", e)
 
