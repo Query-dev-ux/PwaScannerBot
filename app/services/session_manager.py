@@ -1149,11 +1149,36 @@ class SessionManager:
         )
 
         await asyncio.to_thread(self._start_observer, session_id, sess)
+
+        # push subscription is done -> drop the pricey scan proxy
+        if sess.get("push_subscribed"):
+            await self._swap_to_hold(sess)
+
         return PushInfo(
             expires_at, STAGE_INSTALL, sess["pwa_name"],
             sess["start_url"], sess.get("deep_link"),
             sess.get("push_subscribed", False), sess.get("push_endpoint"),
         )
+
+    def _hold_upstream(self, sess: dict) -> str | None:
+        proxy = sess.get("proxy") or {}
+        hold = proxy.get("hold") or self.s.hold_proxy
+        if not hold:
+            return None
+        return pproxy_upstream({"server": hold})
+
+    async def _swap_to_hold(self, sess: dict) -> None:
+        if sess.get("on_hold") or not sess.get("local_proxy"):
+            return
+        up = self._hold_upstream(sess)
+        if not up:
+            return
+        try:
+            await sess["local_proxy"].swap(up)
+            sess["on_hold"] = True
+            log.info("session %s moved to hold proxy", sess["id"][:8])
+        except Exception as e:  # noqa: BLE001
+            log.warning("swap to hold proxy failed: %s", e)
 
     def _start_observer(self, session_id: str, sess: dict) -> None:
         from app.services.cdp_bridge import CdpBridge
@@ -1224,16 +1249,17 @@ class SessionManager:
     async def retry_subscriptions(self) -> None:
         """These funnels subscribe to push non-deterministically. For the first
         ~30 min of a collecting session keep retrying a standalone PWA launch
-        until a subscription lands."""
+        until a subscription lands; then move the session to the hold proxy."""
         now = time.time()
         for sid, sess in list(self._sessions.items()):
-            if (
-                not sess.get("collecting")
-                or sess.get("push_subscribed")
-                or sess.get("stage") != STAGE_INSTALL
-                or sess.get("ctl_active")
-                or now - sess.get("scanned_at", now) > 1800
-            ):
+            if not sess.get("collecting") or sess.get("stage") != STAGE_INSTALL:
+                continue
+            aged_out = now - sess.get("scanned_at", now) > 1800
+            if sess.get("push_subscribed") or aged_out:
+                # nothing more to try — release the scan proxy
+                await self._swap_to_hold(sess)
+                continue
+            if sess.get("ctl_active"):
                 continue
             try:
                 launch = await asyncio.to_thread(
@@ -1257,6 +1283,7 @@ class SessionManager:
                     )
                 except Exception:
                     pass
+                await self._swap_to_hold(sess)
 
     # ---------- interactive browser access ----------
 

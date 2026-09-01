@@ -21,14 +21,16 @@ def load_proxies(path: str) -> list[dict]:
         if not isinstance(item, dict) or not item.get("server"):
             continue
         server = _normalize_server(str(item["server"]))
-        out.append(
-            {
-                "name": item.get("name") or _redacted(server),
-                "server": server,
-                "username": item.get("username") or "",
-                "password": item.get("password") or "",
-            }
-        )
+        entry = {
+            "name": item.get("name") or _redacted(server),
+            "server": server,
+            "username": item.get("username") or "",
+            "password": item.get("password") or "",
+        }
+        # optional cheap proxy to hold the collecting session on
+        if item.get("hold"):
+            entry["hold"] = _normalize_server(str(item["hold"]))
+        out.append(entry)
     return out
 
 
