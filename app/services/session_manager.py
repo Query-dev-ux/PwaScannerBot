@@ -384,7 +384,7 @@ class SessionManager:
                 f"  content-type={esc(h.get('content-type','—'))} "
                 f"len={len(r.text or '')} manifest={has_mani}\n"
                 f"  set-cookie={esc(cookies)}\n"
-                f"  <title>={esc((m.group(1).strip() if m else '')[:80])}"
+                f"  title-tag={esc((m.group(1).strip() if m else '')[:80])}"
             )
 
         try:
@@ -502,8 +502,17 @@ class SessionManager:
 
         text = "\n".join(lines)
         for i in range(0, len(text), 3900):
-            await self.bot.send_message(chat_id, text[i:i + 3900],
-                                        disable_web_page_preview=True)
+            chunk = text[i:i + 3900]
+            try:
+                await self.bot.send_message(chat_id, chunk,
+                                            disable_web_page_preview=True)
+            except Exception:  # noqa: BLE001
+                # HTML parse failed somewhere in the dump — send it raw
+                import re as _re
+                await self.bot.send_message(
+                    chat_id, _re.sub(r"<[^>]+>", "", chunk),
+                    parse_mode=None, disable_web_page_preview=True,
+                )
         try:
             if Path(shot).exists():
                 await self.bot.send_photo(chat_id, FSInputFile(shot),
