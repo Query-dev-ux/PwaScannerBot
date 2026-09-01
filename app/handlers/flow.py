@@ -162,6 +162,19 @@ async def view_pushes(cb: CallbackQuery, db: Database):
     await cb.message.answer("\n".join(out)[:4000])
 
 
+@router.callback_query(F.data.startswith("pdl:"))
+async def download_pack(cb: CallbackQuery, manager: SessionManager, db: Database):
+    session_id = cb.data.split(":", 1)[1]
+    if not await db.get_session(session_id):
+        await cb.answer("Сессия не найдена", show_alert=True)
+        return
+    await cb.answer("Собираю архив…")
+    try:
+        await manager.export_pack(session_id)
+    except Exception as e:  # noqa: BLE001
+        await cb.message.answer(f"Ошибка: <code>{esc(str(e))}</code>")
+
+
 @router.callback_query(F.data.startswith("pstop:"))
 async def stop_and_deliver(cb: CallbackQuery, manager: SessionManager, db: Database):
     session_id = cb.data.split(":", 1)[1]
@@ -171,7 +184,7 @@ async def stop_and_deliver(cb: CallbackQuery, manager: SessionManager, db: Datab
     await cb.answer("Останавливаю и собираю архив…")
     try:
         await manager.deliver(session_id)
-        await cb.message.answer("⏹ Сбор остановлен, архив отправлен.")
+        await cb.message.answer("⏹ Сбор остановлен, архив отправлен, браузер закрыт.")
     except Exception as e:  # noqa: BLE001
         await cb.message.answer(f"Ошибка: <code>{esc(str(e))}</code>")
 

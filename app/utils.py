@@ -20,6 +20,47 @@ def esc(text: str | None) -> str:
     return html.escape(str(text)) if text is not None else ""
 
 
+_STAGE_LABEL = {
+    "install": "После установки",
+    "registration": "После регистрации",
+    "deposit": "После депозита",
+    None: "Без стадии",
+}
+
+
+def _row_get(row, key):
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def pack_caption(row, pushes, final: bool = False) -> str:
+    """Caption for the pushes archive — same shape as the session card."""
+    real = [dict(p) for p in pushes if (_row_get(p, "service") or "") != "stage"]
+    by_stage: dict = {}
+    for p in real:
+        by_stage[p.get("stage")] = by_stage.get(p.get("stage"), 0) + 1
+
+    head = "📦 <b>Финальный архив пушей</b>" if final else "📦 <b>Архив пушей</b>"
+    lines = [
+        head,
+        "",
+        session_card(
+            _row_get(row, "pwa_name") or _row_get(row, "site_url"),
+            _row_get(row, "start_url"),
+            _row_get(row, "deep_link"),
+            push_subscribed=bool(_row_get(row, "push_subscribed")),
+        ),
+        "",
+    ]
+    for st in ("install", "registration", "deposit", None):
+        if st in by_stage:
+            lines.append(f"{_STAGE_LABEL[st]}: <b>{by_stage[st]}</b>")
+    lines.append(f"Всего пушей: <b>{len(real)}</b>")
+    return "\n".join(lines)
+
+
 def session_card(
     name: str,
     download_url: str | None,

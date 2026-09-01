@@ -21,7 +21,7 @@ from app.db import Database
 from app.proxies import pproxy_upstream
 from app.services.local_proxy import LocalProxy
 from app.services.packer import build_pack
-from app.utils import esc, origin_of
+from app.utils import esc, origin_of, pack_caption
 
 log = logging.getLogger(__name__)
 
@@ -1335,27 +1335,34 @@ class SessionManager:
             except Exception as e:
                 log.exception("deliver failed: %s", e)
 
-    async def deliver(self, session_id: str) -> None:
-        """Deliver push pack to user."""
+    async def _send_pack(self, session_id: str, final: bool) -> bool:
+        """Build + send the pushes archive. Returns True on success."""
         row = await self.db.get_session(session_id)
-        if not row or row["status"] == "delivered":
-            return
-
+        if not row:
+            return False
         await self.flush_pushes()
         pushes = await self.db.list_pushes(session_id)
         pack_path = build_pack(row, pushes, self.s.sessions_dir)
-
-        real = [p for p in pushes if (p["service"] or "") != "stage"]
-        caption = (
-            f"📦 Пуши из <b>{esc(row['pwa_name'])}</b>\n"
-            f"Сайт: {esc(row['site_url'])}\n"
-            f"Всего: <b>{len(real)}</b>"
-        )
         try:
-            await self.bot.send_document(row["chat_id"], FSInputFile(pack_path), caption=caption)
-        except Exception as e:
+            await self.bot.send_document(
+                row["chat_id"], FSInputFile(pack_path),
+                caption=pack_caption(row, pushes, final=final),
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
             log.exception("send_document failed: %s", e)
+            return False
 
+    async def export_pack(self, session_id: str) -> None:
+        """Send the current archive WITHOUT stopping collection."""
+        await self._send_pack(session_id, final=False)
+
+    async def deliver(self, session_id: str) -> None:
+        """Final delivery: send the archive, mark delivered, close the session."""
+        row = await self.db.get_session(session_id)
+        if not row or row["status"] == "delivered":
+            return
+        await self._send_pack(session_id, final=True)
         await self.db.set_session_fields(
             session_id, status="delivered", delivered_at=time.time()
         )
