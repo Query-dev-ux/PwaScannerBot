@@ -226,7 +226,7 @@ class SessionManager:
                         "return document.body?document.body.innerText:''") or ""):
                     raise RuntimeError("клоака отдала декой (проверь гео прокси)")
 
-                manifest = {}
+                manifest, murl = {}, None
                 try:
                     murl = driver.execute_script(
                         "var l=document.querySelector('link[rel~=\"manifest\"]');"
@@ -238,7 +238,11 @@ class SessionManager:
                         manifest = requests.get(murl, timeout=12).json()
                 except Exception:
                     pass
-                start_url = manifest.get("start_url") or origin_of(cur or url) + "/"
+
+                base = cur if cur.startswith("http") else url
+                start_url = urljoin(base, "/")
+                if manifest.get("start_url"):
+                    start_url = urljoin(murl or base, manifest["start_url"])
                 name = (manifest.get("name") or manifest.get("short_name")
                         or title or url)
                 launch = self._launch_pwa(driver, start_url, link_only=True)
@@ -931,6 +935,9 @@ class SessionManager:
         redirect chain to the in-app deep link AND (unless link_only) grabs the
         push subscription the funnel creates on that standalone launch."""
         out = {"deep_link": start_url, "push_subscribed": False, "push_endpoint": None}
+        if not str(start_url).lower().startswith(("http://", "https://")):
+            log.warning("pwa launch: bad start_url %r", start_url)
+            return out
         original = None
         origin = origin_of(start_url)
         try:
@@ -943,16 +950,23 @@ class SessionManager:
                     driver.execute_cdp_cmd(
                         "Page.addScriptToEvaluateOnNewDocument", {"source": src}
                     )
-                driver.execute_cdp_cmd(
-                    "Browser.grantPermissions",
-                    {"origin": origin, "permissions": ["notifications"]},
-                )
             except Exception as e:  # noqa: BLE001
                 log.warning("launch-tab hook inject failed: %s", e)
 
             driver.set_page_load_timeout(45)
             driver.set_script_timeout(12)
             norm = lambda u: (u or "").rstrip("/").split("#")[0]
+
+            def _grant():
+                if link_only:
+                    return
+                try:
+                    driver.execute_cdp_cmd(
+                        "Browser.grantPermissions",
+                        {"origin": origin, "permissions": ["notifications"]},
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("grant notifications failed: %s", e)
 
             def _grab_sub(budget_ms):
                 if out["push_endpoint"]:
@@ -972,6 +986,7 @@ class SessionManager:
                 driver.get(start_url)
             except TimeoutException:
                 pass
+            _grant()
 
             last, stable, final = None, 0, start_url
             for i in range(18 if link_only else 30):
