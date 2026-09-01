@@ -39,6 +39,7 @@ class InspectResult:
     installable: bool
     screenshot: str | None
     deep_link: str | None = None
+    push_subscribed: bool = False
 
 
 @dataclass
@@ -172,6 +173,97 @@ class SessionManager:
         locale = f"{lang}-{cc}" if cc else "en-US"
         return locale, accept_lang
 
+    async def extract_link(self, proxy: dict | None, url: str) -> dict:
+        """Fast path: pass the cloaker, resolve the in-app deep link, close.
+        No funnel interaction, no manifest deep-dive, no push, no kept session."""
+        profile_dir = str(
+            (Path(self.s.sessions_dir) / ("_link_" + uuid.uuid4().hex)).resolve()
+        )
+        os.makedirs(profile_dir, exist_ok=True)
+        local_proxy = driver = None
+        try:
+            proxy_url = None
+            if proxy:
+                local_proxy = LocalProxy(pproxy_upstream(proxy))
+                proxy_url = await local_proxy.start()
+
+            geo = None
+            if proxy_url:
+                geo = await asyncio.to_thread(self._probe_geo_http, proxy_url)
+                if not (geo and geo.get("ip")):
+                    raise RuntimeError("прокси не выходит в интернет")
+
+            driver = await asyncio.to_thread(
+                self._setup_undetected_driver, profile_dir, proxy_url, geo
+            )
+
+            def work():
+                self._apply_stealth(driver, geo)
+                try:
+                    driver.get(url)
+                except TimeoutException:
+                    pass
+                time.sleep(3)
+                src = ""
+                try:
+                    src = driver.page_source or ""
+                except Exception:
+                    pass
+                cur = ""
+                try:
+                    cur = driver.current_url or ""
+                except Exception:
+                    pass
+                if self._looks_like_error_page(cur, src):
+                    raise RuntimeError("сайт не открылся через прокси")
+                title = ""
+                try:
+                    title = driver.title or ""
+                except Exception:
+                    pass
+                if self._looks_blocked(title, src) or self._looks_blocked(
+                    title, driver.execute_script(
+                        "return document.body?document.body.innerText:''") or ""):
+                    raise RuntimeError("клоака отдала декой (проверь гео прокси)")
+
+                manifest = {}
+                try:
+                    murl = driver.execute_script(
+                        "var l=document.querySelector('link[rel~=\"manifest\"]');"
+                        "return l?l.href:null;"
+                    )
+                    if murl:
+                        import requests
+
+                        manifest = requests.get(murl, timeout=12).json()
+                except Exception:
+                    pass
+                start_url = manifest.get("start_url") or origin_of(cur or url) + "/"
+                name = (manifest.get("name") or manifest.get("short_name")
+                        or title or url)
+                launch = self._launch_pwa(driver, start_url, link_only=True)
+                return {
+                    "name": name,
+                    "start_url": start_url,
+                    "deep_link": launch["deep_link"],
+                }
+
+            return await asyncio.to_thread(work)
+        finally:
+            if driver:
+                try:
+                    await asyncio.to_thread(driver.quit)
+                except Exception:
+                    pass
+            if local_proxy:
+                await local_proxy.stop()
+            try:
+                import shutil
+
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     async def open_site(
         self, user_id: int, chat_id: int, proxy: dict | None, url: str
     ) -> InspectResult:
@@ -265,7 +357,8 @@ class SessionManager:
             }
 
             return InspectResult(
-                session_id, name, start_url, scope, installable, screenshot, deep_link
+                session_id, name, start_url, scope, installable, screenshot,
+                deep_link, bool(info.get("push_subscribed")),
             )
 
         except Exception as e:
@@ -833,11 +926,10 @@ class SessionManager:
     )
 
 
-    def _launch_pwa(self, driver, start_url: str) -> dict:
+    def _launch_pwa(self, driver, start_url: str, link_only: bool = False) -> dict:
         """Open start_url in a fresh tab emulating a PWA launch. Follows the
-        redirect chain to the in-app deep link AND grabs the push subscription
-        the funnel creates on that standalone launch (fake-store funnels only
-        subscribe here, not on the normal page)."""
+        redirect chain to the in-app deep link AND (unless link_only) grabs the
+        push subscription the funnel creates on that standalone launch."""
         out = {"deep_link": start_url, "push_subscribed": False, "push_endpoint": None}
         original = None
         origin = origin_of(start_url)
@@ -882,8 +974,9 @@ class SessionManager:
                 pass
 
             last, stable, final = None, 0, start_url
-            for i in range(30):
-                if not out["push_endpoint"] and origin_of(driver.current_url or "") == origin:
+            for i in range(18 if link_only else 30):
+                if (not link_only and not out["push_endpoint"]
+                        and origin_of(driver.current_url or "") == origin):
                     _grab_sub(3000)
                 time.sleep(1)
                 try:
@@ -895,7 +988,8 @@ class SessionManager:
                 redirected = origin_of(cur) != origin and norm(cur) != norm(start_url)
                 if cur == last:
                     stable += 1
-                    if stable >= 3 and (redirected or (out["push_endpoint"] and i >= 15)):
+                    if stable >= 3 and (redirected or link_only
+                                        or (out["push_endpoint"] and i >= 15)):
                         break
                 else:
                     stable, last = 0, cur
@@ -908,7 +1002,7 @@ class SessionManager:
 
             # subscription may have landed while/after it redirected us away —
             # check from a plain resource on the funnel origin (SW + sub persist)
-            if not out["push_endpoint"]:
+            if not link_only and not out["push_endpoint"]:
                 try:
                     driver.get(origin + "/favicon.ico")
                     time.sleep(1.5)

@@ -7,6 +7,8 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from app.access import NEED_KEY, can_collect
+from app.config import Settings
 from app.db import Database
 from app.keyboards import collecting_actions_kb, enable_push_kb
 from app.services.session_manager import (
@@ -49,23 +51,38 @@ async def got_url(message: Message, state: FSMContext, manager: SessionManager):
 
     data = await state.get_data()
     proxy = data.get("proxy")
+    mode = data.get("mode", "collect")
+    await state.clear()
 
-    status = await message.answer("⏳ Открываю сайт, устанавливаю PWA, ищу ссылку внутри PWA…")
+    if mode == "link":
+        status = await message.answer("⏳ Пробиваю клоаку, ищу ссылку внутри PWA…")
+        try:
+            res = await manager.extract_link(proxy, url)
+        except Exception as e:  # noqa: BLE001
+            await status.edit_text(f"Ошибка: <code>{esc(str(e))}</code>")
+            return
+        await status.edit_text(
+            f"Название PWA: <b>{esc(res['name'])}</b>\n"
+            f"Ссылка на PWA: {esc(res['start_url'])}\n"
+            f"Ссылка внутри PWA: {esc(res['deep_link'])}",
+            disable_web_page_preview=True,
+        )
+        return
+
+    status = await message.answer("⏳ Пробиваю клоаку, ставлю PWA, подписываюсь на push…")
     try:
         res = await manager.open_site(message.from_user.id, message.chat.id, proxy, url)
     except SessionLimit:
         await status.edit_text("Слишком много активных сессий. Попробуй позже.")
-        await state.clear()
         return
     except Exception as e:  # noqa: BLE001
         await status.edit_text(f"Ошибка: <code>{esc(str(e))}</code>")
-        await state.clear()
         return
 
-    await state.clear()
     await status.edit_text(
-        session_card(res.name, res.start_url, res.deep_link)
-        + "\n\nСессия <b>не сохранена</b>. Включи сбор пушей, чтобы начать.",
+        session_card(res.name, res.start_url, res.deep_link,
+                     push_subscribed=res.push_subscribed)
+        + "\n\nСессия <b>не сохранена</b>. Включи сбор push, чтобы начать.",
         reply_markup=enable_push_kb(res.session_id),
     )
 
@@ -198,8 +215,14 @@ async def cancel_session(cb: CallbackQuery, manager: SessionManager):
 
 
 @router.message(Command("cancel_all"))
-async def cancel_all(message: Message, state: FSMContext, manager: SessionManager, db: Database):
+async def cancel_all(
+    message: Message, state: FSMContext, manager: SessionManager,
+    db: Database, settings: Settings,
+):
     await state.clear()
+    if not await can_collect(db, settings, message.from_user.id):
+        await message.answer(NEED_KEY)
+        return
     n = 0
     for sid in list(manager._sessions):
         await manager.cancel(sid)

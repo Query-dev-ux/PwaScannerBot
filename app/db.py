@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS pushes(
   raw TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_pushes_session ON pushes(session_id);
+CREATE TABLE IF NOT EXISTS authorized(
+  user_id INTEGER PRIMARY KEY,
+  granted_at REAL
+);
 """
 
 ACTIVE_STATUSES = ("inspected", "collecting")
@@ -146,6 +150,29 @@ class Database:
                 (user_id,),
             )
             return await cur.fetchall()
+
+    # ---------- access ----------
+    async def is_authorized(self, user_id: int) -> bool:
+        async with self._conn() as db:
+            cur = await db.execute(
+                "SELECT 1 FROM authorized WHERE user_id=?", (user_id,)
+            )
+            return await cur.fetchone() is not None
+
+    async def authorize(self, user_id: int) -> None:
+        import time
+
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO authorized(user_id,granted_at) VALUES(?,?)",
+                (user_id, time.time()),
+            )
+            await db.commit()
+
+    async def deauthorize(self, user_id: int) -> None:
+        async with self._conn() as db:
+            await db.execute("DELETE FROM authorized WHERE user_id=?", (user_id,))
+            await db.commit()
 
     # ---------- pushes ----------
     async def add_push(self, session_id: str, rec: dict[str, Any]) -> bool:

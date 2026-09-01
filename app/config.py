@@ -35,6 +35,9 @@ class Settings(BaseSettings):
 
     qa_token: str = Field(default="", alias="QA_TOKEN")
 
+    # Unlocks the Push-collection features. Users run /unlock <key>.
+    access_key: str = Field(default="", alias="ACCESS_KEY")
+
     # Cheap proxy to hold a collecting session on after the push subscription is
     # created (the scan proxy is only needed to get past anti-bot). Same format
     # as a proxies.json "server". Empty = keep the scan proxy the whole time.
