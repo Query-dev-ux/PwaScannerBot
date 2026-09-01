@@ -123,12 +123,21 @@ class SessionManager:
         profile_dir: str,
         proxy_url: str | None = None,
         geo: dict | None = None,
+        app_url: str | None = None,
     ):
-        """Launch undetected-chromedriver emulating a real Android Chrome."""
+        """Launch undetected-chromedriver emulating a real Android Chrome.
+
+        app_url: open in Chrome "app window" mode — a REAL display-mode:
+        standalone context (not the JS spoof), i.e. what an installed PWA
+        launched from the home screen gets. Some funnels only arm their
+        push subscription in that context.
+        """
         import undetected_chromedriver as uc
 
         chrome_options = uc.ChromeOptions()
         chrome_options.user_data_dir = profile_dir
+        if app_url:
+            chrome_options.add_argument(f"--app={app_url}")
 
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument(
@@ -597,6 +606,7 @@ class SessionManager:
                 "user_id": user_id,
                 "chat_id": chat_id,
                 "proxy": proxy,
+                "geo": geo,
                 "site_url": url,
                 "pwa_name": name,
                 "start_url": start_url,
@@ -1932,6 +1942,56 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("install prompt trigger failed: %s", e)
 
+    def _reopen_as_installed_pwa(self, sess: dict) -> dict:
+        """Quit the scan driver and relaunch it in Chrome --app mode on the PWA
+        start_url — a REAL standalone context. Funnels that only arm push from
+        the installed app (verified: newlifejoker.club shows the prompt only
+        after the downloaded PWA is opened) subscribe here."""
+        out = {"subscribed": False, "endpoint": None}
+        start_url = sess.get("start_url")
+        if not start_url or not str(start_url).lower().startswith("http"):
+            return out
+        lp = sess.get("local_proxy")
+        proxy_url = lp.url if lp else None
+        geo = sess.get("geo")
+        origin = origin_of(start_url)
+        log.info("installed-PWA relaunch: --app=%s", start_url)
+        try:
+            old = sess.get("driver")
+            if old:
+                try:
+                    old.quit()
+                except Exception:
+                    pass
+            time.sleep(1)
+            driver = self._setup_undetected_driver(
+                sess["profile_dir"], proxy_url, geo, app_url=start_url)
+            sess["driver"] = driver
+            self._apply_stealth(driver, geo)
+            try:
+                driver.get(start_url)
+            except TimeoutException:
+                pass
+            try:
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {"origin": origin, "permissions": ["notifications"]})
+            except Exception:
+                pass
+            deadline = time.time() + 50
+            while time.time() < deadline:
+                r = self._subscribe_push(driver, start_url, budget_ms=8000)
+                if r.get("subscribed") and r.get("endpoint"):
+                    out.update(subscribed=True, endpoint=r["endpoint"])
+                    log.info("installed-PWA relaunch: subscribed via %s (%s)",
+                             r.get("by", "?"), r["endpoint"].split("/")[2])
+                    return out
+                time.sleep(3)
+            log.info("installed-PWA relaunch: still no subscription")
+        except Exception as e:  # noqa: BLE001
+            log.warning("installed-PWA relaunch failed: %s", e)
+        return out
+
     async def enable_push_collection(self, session_id: str) -> PushInfo:
         """Persist the session and start collecting pushes (stage: install)."""
         sess = self._sessions.get(session_id)
@@ -1963,6 +2023,15 @@ class SessionManager:
                     sess.update(push_subscribed=True,
                                 push_endpoint=launch.get("push_endpoint"),
                                 push_by=launch.get("push_by"))
+
+        # Last resort: relaunch the browser as an installed PWA (--app mode).
+        # Some funnels only show the push prompt from that real standalone
+        # context. This replaces sess["driver"].
+        if sess.get("push_by") != "funnel":
+            r = await asyncio.to_thread(self._reopen_as_installed_pwa, sess)
+            if r["subscribed"]:
+                sess.update(push_subscribed=True, push_endpoint=r["endpoint"],
+                            push_by="funnel")
 
         expires_at = time.time() + self.s.collect_seconds
         sess.update(collecting=True, stage=STAGE_INSTALL, expires_at=expires_at)
