@@ -1188,7 +1188,9 @@ class SessionManager:
         if not manifest and _m:
             manifest, manifest_url = _m, _mu
         if manifest:
-            log.info("manifest read: %s", manifest.get("name") or manifest_url)
+            log.info("manifest read: name=%s scope=%s start_url=%s",
+                     manifest.get("name"), manifest.get("scope"),
+                     manifest.get("start_url"))
         else:
             log.warning("manifest read failed (url=%s)", manifest_url)
 
@@ -1535,6 +1537,18 @@ class SessionManager:
                 log.info("no redirect on PWA launch - deep link = start_url")
                 if link_only:
                     self._log_launch_state(driver, origin)
+
+            if not link_only:
+                try:
+                    diag = driver.execute_script(
+                        "return {vapid: !!window.__vapidKey,"
+                        " subCalls: window.__subCalled||0,"
+                        " ls: !!(window.localStorage&&localStorage.getItem('__pushEndpoint')),"
+                        " ctrl: !!(navigator.serviceWorker&&navigator.serviceWorker.controller),"
+                        " origin: location.origin};") or {}
+                    log.info("push diag: %s", diag)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("push diag failed: %s", e)
 
             if not link_only and not out["push_endpoint"]:
                 # The funnel fires subscribe() before its SW is active and never
