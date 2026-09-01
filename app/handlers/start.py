@@ -48,6 +48,7 @@ async def _begin_scan(
     prompt = {
         "link": "Прокси для поиска оффер-линка:",
         "probe": "Прокси для диагностики:",
+        "js": "Прокси для выгрузки JS:",
     }.get(mode, "Прокси для сбора push:")
     await message.answer(prompt, reply_markup=proxies_kb(proxies))
 
@@ -137,6 +138,15 @@ async def cmd_probe(message: Message, state: FSMContext, settings: Settings, db:
         await message.answer(NEED_KEY)
         return
     await _begin_scan(message, state, settings, mode="probe")
+
+
+@router.message(Command("js"))
+async def cmd_js(message: Message, state: FSMContext, settings: Settings, db: Database):
+    await state.clear()
+    if not await can_collect(db, settings, message.from_user.id):
+        await message.answer(NEED_KEY)
+        return
+    await _begin_scan(message, state, settings, mode="js")
 
 
 @router.message(Command("status"))

@@ -359,6 +359,98 @@ class SessionManager:
             except Exception:
                 pass
 
+    async def dump_js(self, chat_id: int, proxy: dict | None, url: str) -> None:
+        """Load url past the cloaker, fetch every same-origin script bundle +
+        the service worker (through the proxy / browser), send them as files."""
+        profile_dir = str(
+            (Path(self.s.sessions_dir) / ("_js_" + uuid.uuid4().hex)).resolve()
+        )
+        os.makedirs(profile_dir, exist_ok=True)
+        local_proxy = driver = None
+        sent = 0
+        try:
+            proxy_url = None
+            if proxy:
+                local_proxy = LocalProxy(pproxy_upstream(proxy))
+                proxy_url = await local_proxy.start()
+            geo = None
+            if proxy_url:
+                geo = await asyncio.to_thread(self._probe_geo_http, proxy_url)
+            driver = await asyncio.to_thread(
+                self._setup_undetected_driver, profile_dir, proxy_url, geo)
+
+            def work() -> dict:
+                self._apply_stealth(driver, geo)
+                for _ in range(4):
+                    try:
+                        driver.get(url)
+                    except TimeoutException:
+                        pass
+                    time.sleep(3)
+                    m, _mu = self._read_manifest(driver, budget_ms=6000)
+                    if m:
+                        break
+                    try:
+                        driver.delete_all_cookies()
+                    except Exception:
+                        pass
+                # optional standalone launch to also grab the pwa_ page's chunks
+                files = driver.execute_async_script(r"""
+                  const cb = arguments[arguments.length - 1];
+                  const org = location.origin;
+                  const urls = new Set();
+                  for (const s of document.scripts)
+                    if (s.src && s.src.indexOf(org) === 0) urls.add(s.src);
+                  (async () => {
+                    try {
+                      const reg = await navigator.serviceWorker.getRegistration();
+                      const u = reg && (reg.active||reg.installing||reg.waiting);
+                      if (u && u.scriptURL) urls.add(u.scriptURL);
+                    } catch (e) {}
+                    const out = {};
+                    for (const u of urls) {
+                      try { out[u] = await fetch(u).then(r => r.text()); }
+                      catch (e) { out[u] = '/* fetch failed: ' + e + ' */'; }
+                    }
+                    // also the raw pwa_ page HTML
+                    try {
+                      const m = document.querySelector('link[rel~="manifest"]');
+                      out['__manifest__'] = m ? await fetch(m.href).then(r=>r.text()) : '';
+                    } catch (e) {}
+                    cb(out);
+                  })();
+                """) or {}
+                return files
+
+            files = await asyncio.to_thread(work)
+            for u, text in files.items():
+                name = re.sub(r"[^\w.-]", "_", u.split("/")[-1] or "file")[:60]
+                if not name.endswith((".js", ".json", ".txt")):
+                    name += ".txt"
+                p = Path(profile_dir) / f"{sent:02d}_{name}"
+                p.write_text(text or "", encoding="utf-8")
+                await self.bot.send_document(
+                    chat_id, FSInputFile(str(p)),
+                    caption=u[:1000])
+                sent += 1
+            if not sent:
+                await self.bot.send_message(chat_id, "Скриптов не найдено.")
+        except Exception as e:  # noqa: BLE001
+            await self.bot.send_message(chat_id, f"dump_js: {esc(str(e))}")
+        finally:
+            if driver:
+                try:
+                    await asyncio.to_thread(driver.quit)
+                except Exception:
+                    pass
+            if local_proxy:
+                await local_proxy.stop()
+            try:
+                import shutil
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     async def probe_offer(self, chat_id: int, proxy: dict | None, url: str) -> None:
         """Full diagnostic dump for one offer URL — what the proxy exit looks
         like, what the cloaker returns over N loads (HTTP + browser), and what

@@ -62,6 +62,14 @@ async def got_url(message: Message, state: FSMContext, manager: SessionManager):
             await message.answer(f"Ошибка: <code>{esc(str(e))}</code>")
         return
 
+    if mode == "js":
+        await message.answer("📥 Выгружаю JS воронки…")
+        try:
+            await manager.dump_js(message.chat.id, proxy, url)
+        except Exception as e:  # noqa: BLE001
+            await message.answer(f"Ошибка: <code>{esc(str(e))}</code>")
+        return
+
     if mode == "link":
         status = await message.answer("⏳ Пробиваю клоаку, ищу ссылку внутри PWA…")
         try:
