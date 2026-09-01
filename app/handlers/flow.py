@@ -83,10 +83,24 @@ async def got_url(message: Message, state: FSMContext, manager: SessionManager):
     if res.shell:
         tail = (
             "\n\n⚠️ Воронка вернула <b>пустую страницу</b> (нет manifest, пустой body). "
-            "Обычно это декой клоаки. Проверь: гео прокси под оффер, "
-            "убери шаблонные плейсхолдеры из ссылки "
-            "(<code>{{campaign.name}}</code>, <code>{pixel}</code> и т.п.), "
-            "попробуй другой прокси."
+            "Обычно это декой клоаки."
+        )
+        if res.exit_hosting and not res.exit_mobile:
+            tail += (
+                f"\n\n🛑 Выходной IP <code>{esc(res.exit_ip or '?')}</code> "
+                f"(<i>{esc(res.exit_isp or '?')}</i>) — это <b>дата-центр/хостинг</b>. "
+                "Клоаки мобильных офферов режут такие IP сразу. "
+                "Нужна <b>мобильная</b> или резидентная прокси гео-страны оффера."
+            )
+        else:
+            tail += (
+                f"\n\nВыходной IP: <code>{esc(res.exit_ip or '?')}</code> "
+                f"(<i>{esc(res.exit_isp or '?')}</i>). "
+            )
+        tail += (
+            "\n\nЕщё проверь: ссылка с <b>валидными</b> трек-параметрами "
+            "(не пустая и не с плейсхолдерами <code>{{campaign.name}}</code>, "
+            "<code>{pixel}</code>), гео прокси совпадает с гео оффера."
         )
     await status.edit_text(
         session_card(res.name, res.start_url, res.deep_link,

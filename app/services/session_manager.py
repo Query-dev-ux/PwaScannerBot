@@ -42,6 +42,10 @@ class InspectResult:
     push_subscribed: bool = False
     push_by: str | None = None
     shell: bool = False
+    exit_ip: str | None = None
+    exit_isp: str | None = None
+    exit_hosting: bool = False
+    exit_mobile: bool = False
 
 
 @dataclass
@@ -242,7 +246,13 @@ class SessionManager:
                 if self._looks_blocked(title, src) or self._looks_blocked(
                     title, driver.execute_script(
                         "return document.body?document.body.innerText:''") or ""):
-                    raise RuntimeError("клоака отдала декой (проверь гео прокси)")
+                    hint = "проверь гео прокси"
+                    if (geo or {}).get("hosting") and not (geo or {}).get("mobile"):
+                        hint = (
+                            f"выходной IP {geo.get('ip')} ({geo.get('isp')}) — "
+                            "дата-центр, нужна мобильная/резидентная прокси"
+                        )
+                    raise RuntimeError(f"клоака отдала декой ({hint})")
 
                 manifest, murl = {}, None
                 try:
@@ -318,10 +328,20 @@ class SessionManager:
                 geo = await asyncio.to_thread(self._probe_geo_http, proxy_url)
                 if geo and geo.get("ip"):
                     log.info(
-                        "proxy OK: ip=%s cc=%s city=%s tz=%s isp=%s",
+                        "proxy OK: ip=%s cc=%s city=%s tz=%s isp=%s "
+                        "mobile=%s hosting=%s proxy=%s",
                         geo.get("ip"), geo.get("country_code"), geo.get("city"),
                         geo.get("timezone"), geo.get("isp"),
+                        geo.get("mobile"), geo.get("hosting"), geo.get("proxy"),
                     )
+                    if geo.get("hosting") and not geo.get("mobile"):
+                        log.warning(
+                            "exit IP %s (%s) is a HOSTING/datacenter range — "
+                            "mobile-geo cloakers reject these; a shell/decoy "
+                            "response is expected. Use a mobile or residential "
+                            "proxy for this offer.",
+                            geo.get("ip"), geo.get("isp"),
+                        )
                 else:
                     raise RuntimeError(
                         "браузер/прокси не выходит в интернет "
@@ -383,6 +403,8 @@ class SessionManager:
                 session_id, name, start_url, scope, installable, screenshot,
                 deep_link, bool(info.get("push_subscribed")),
                 info.get("push_by"), bool(info.get("shell")),
+                (geo or {}).get("ip"), (geo or {}).get("isp"),
+                bool((geo or {}).get("hosting")), bool((geo or {}).get("mobile")),
             )
 
         except Exception as e:
@@ -492,7 +514,8 @@ class SessionManager:
         try:
             r = requests.get(
                 "http://ip-api.com/json/?fields=status,message,country,"
-                "countryCode,region,city,timezone,lat,lon,query,isp",
+                "countryCode,region,city,timezone,lat,lon,query,isp,"
+                "mobile,proxy,hosting",
                 proxies=proxies,
                 timeout=25,
             )
@@ -507,6 +530,9 @@ class SessionManager:
                     "lat": data.get("lat"),
                     "lon": data.get("lon"),
                     "isp": data.get("isp"),
+                    "mobile": bool(data.get("mobile")),
+                    "proxy": bool(data.get("proxy")),
+                    "hosting": bool(data.get("hosting")),
                 }
         except Exception as e:  # noqa: BLE001
             log.warning("geo probe (ip-api) failed: %s", e)
