@@ -27,12 +27,18 @@ def session_card(
     stage_label: str | None = None,
     pushes: int | None = None,
     until: str | None = None,
+    push_subscribed: bool | None = None,
 ) -> str:
     lines = [
         f"Название PWA: <b>{esc(name)}</b>",
         f"Ссылка на PWA: {esc(download_url or '—')}",
         f"Ссылка внутри PWA: {esc(deep_link or download_url or '—')}",
     ]
+    if push_subscribed is not None:
+        lines.append(
+            "Push-подписка: "
+            + ("✅ есть" if push_subscribed else "⚠️ нет (воронка не подписала)")
+        )
     if stage_label is not None:
         lines.append(f"Стадия: <b>{esc(stage_label)}</b>")
     if pushes is not None:

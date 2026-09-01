@@ -81,13 +81,22 @@ async def push_on(cb: CallbackQuery, manager: SessionManager):
         await cb.message.answer(f"Не удалось включить сбор: <code>{esc(str(e))}</code>")
         return
     until = datetime.fromtimestamp(info.expires_at).strftime("%d.%m %H:%M")
+    tail = (
+        "\n\nОткрой браузер сессии (🖥), зарегистрируйся и внеси депозит, "
+        "затем отмечай стадию."
+    )
+    if not info.push_subscribed:
+        tail += (
+            "\n\n⚠️ Push-подписка не создана — воронка не подписала браузер "
+            "автоматически. Пуши могут не приходить. Открой браузер сессии и "
+            "пройди воронку/установку до конца."
+        )
     await cb.message.answer(
         session_card(
             info.name, info.download_url, info.deep_link,
-            STAGE_LABEL.get(info.stage, info.stage), 0, until,
+            STAGE_LABEL.get(info.stage, info.stage), 0, until, info.push_subscribed,
         )
-        + "\n\nОткрой браузер сессии (🖥), зарегистрируйся и внеси депозит, "
-        "затем отмечай стадию.",
+        + tail,
         reply_markup=collecting_actions_kb(session_id, info.stage),
     )
 

@@ -48,6 +48,8 @@ class PushInfo:
     name: str = "сессия"
     download_url: str | None = None
     deep_link: str | None = None
+    push_subscribed: bool = False
+    push_endpoint: str | None = None
 
 
 # Push-collection stages, in order.
@@ -958,6 +960,12 @@ class SessionManager:
 
         await asyncio.to_thread(_grant)
 
+        sub = await asyncio.to_thread(
+            self._ensure_push_subscription, driver, sess["start_url"]
+        )
+        sess["push_subscribed"] = sub["subscribed"]
+        sess["push_endpoint"] = sub.get("endpoint")
+
         expires_at = time.time() + self.s.collect_seconds
         sess.update(collecting=True, stage=STAGE_INSTALL, expires_at=expires_at)
 
@@ -985,7 +993,67 @@ class SessionManager:
         return PushInfo(
             expires_at, STAGE_INSTALL, sess["pwa_name"],
             sess["start_url"], sess.get("deep_link"),
+            sess.get("push_subscribed", False), sess.get("push_endpoint"),
         )
+
+    _SUB_CHECK_JS = """
+    const cb = arguments[arguments.length - 1];
+    (async () => {
+      try {
+        if (!('serviceWorker' in navigator)) return cb({subscribed:false, reason:'no-sw-api'});
+        let reg = await navigator.serviceWorker.getRegistration();
+        if (!reg) { try { reg = await navigator.serviceWorker.ready; } catch(e){} }
+        if (!reg) return cb({subscribed:false, reason:'no-registration'});
+        const sub = await reg.pushManager.getSubscription();
+        if (!sub) return cb({subscribed:false, reason:'not-subscribed',
+                             perm: (typeof Notification!=='undefined') ? Notification.permission : '?'});
+        cb({subscribed:true, endpoint: sub.endpoint});
+      } catch (e) { cb({subscribed:false, reason:String(e)}); }
+    })();
+    """
+
+    def _ensure_push_subscription(self, driver, start_url: str) -> dict:
+        """Check whether the funnel created a PushSubscription in this browser;
+        if not, nudge it (standalone re-visit) and re-check."""
+        out = {"subscribed": False, "endpoint": None, "reason": None}
+        try:
+            driver.set_script_timeout(25)
+            if origin_of(driver.current_url or "") != origin_of(start_url):
+                driver.get(start_url)
+                time.sleep(4)
+
+            for attempt in range(3):
+                r = driver.execute_async_script(self._SUB_CHECK_JS) or {}
+                if r.get("subscribed"):
+                    out.update(subscribed=True, endpoint=r.get("endpoint"))
+                    break
+                out["reason"] = r.get("reason")
+                log.info("push-sub check #%d: %s (perm=%s)",
+                         attempt + 1, r.get("reason"), r.get("perm"))
+                if attempt < 2:
+                    # nudge: re-request + reload as if the PWA was launched
+                    try:
+                        driver.execute_script("try{Notification.requestPermission()}catch(e){}")
+                        driver.execute_cdp_cmd(
+                            "Page.addScriptToEvaluateOnNewDocument",
+                            {"source": self._STANDALONE_SPOOF_JS},
+                        )
+                    except Exception:
+                        pass
+                    driver.get(start_url)
+                    time.sleep(5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("push subscription check failed: %s", e)
+        finally:
+            try:
+                driver.set_script_timeout(20)
+            except Exception:
+                pass
+
+        host = (out["endpoint"] or "").split("/")[2] if out["endpoint"] else None
+        log.info("push subscription: subscribed=%s host=%s reason=%s",
+                 out["subscribed"], host, out["reason"])
+        return out
 
     def _start_observer(self, session_id: str, sess: dict) -> None:
         from app.services.cdp_bridge import CdpBridge
