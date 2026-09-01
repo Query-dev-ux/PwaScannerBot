@@ -2060,37 +2060,56 @@ class SessionManager:
 
     def _dump_funnel_logic(self, driver, origin: str) -> None:
         """Log the funnel's page/SW JS around the push/standalone gate, so we
-        can see what signal it checks to decide 'subscribe' vs 'redirect'."""
+        can see what signal it checks to decide 'subscribe' vs 'redirect'.
+        Fetches same-origin external bundles and pulls a context window
+        around each keyword (the code is minified onto one line)."""
         try:
             info = driver.execute_async_script(r"""
               const cb = arguments[arguments.length - 1];
-              const KW = /(pushManager|subscribe|Notification|requestPermission|standalone|display-mode|getInstalledRelatedApps|referrer|matchMedia|navigator\.standalone)/;
-              const grab = (t) => (t || '').split('\n')
-                .filter(l => KW.test(l)).map(l => l.trim().slice(0, 200)).slice(0, 25);
-              const out = {inline: [], srcs: [], sw: null};
-              for (const s of document.scripts) {
-                if (s.src) out.srcs.push(s.src);
-                else out.inline.push(...grab(s.textContent));
-              }
+              const origin = arguments[0];
+              const KWS = ['pushManager','requestPermission','getInstalledRelatedApps',
+                'display-mode: standalone','navigator.standalone','matchMedia',
+                'referrer','beforeinstallprompt','applicationServerKey','vapid',
+                'Notification.permission'];
+              const ctx = (t) => {
+                const hits = [];
+                for (const kw of KWS) {
+                  let i = 0;
+                  while ((i = t.indexOf(kw, i)) !== -1 && hits.length < 40) {
+                    hits.push(t.slice(Math.max(0, i - 90), i + 130)
+                      .replace(/\s+/g, ' '));
+                    i += kw.length;
+                  }
+                }
+                return hits;
+              };
+              const urls = [];
+              for (const s of document.scripts)
+                if (s.src && s.src.indexOf(origin) === 0) urls.push(s.src);
               (async () => {
+                const out = {files: {}};
                 try {
                   const reg = await navigator.serviceWorker.getRegistration();
                   const u = reg && (reg.active||reg.installing||reg.waiting);
-                  if (u && u.scriptURL) {
-                    out.swUrl = u.scriptURL;
-                    const t = await fetch(u.scriptURL).then(r=>r.text()).catch(()=>'');
-                    out.sw = grab(t);
-                  }
+                  if (u && u.scriptURL) urls.push(u.scriptURL);
                 } catch (e) {}
+                for (const u of urls) {
+                  try {
+                    const t = await fetch(u).then(r => r.text());
+                    out.files[u] = {len: t.length, hits: ctx(t)};
+                  } catch (e) { out.files[u] = {err: String(e)}; }
+                }
                 cb(out);
               })();
-            """) or {}
-            log.info("funnel logic: srcs=%s", (info.get("srcs") or [])[:8])
-            for l in (info.get("inline") or [])[:20]:
-                log.info("funnel inline: %s", l)
-            log.info("funnel SW: url=%s", info.get("swUrl"))
-            for l in (info.get("sw") or [])[:20]:
-                log.info("funnel sw-js: %s", l)
+            """, origin) or {}
+            for u, f in (info.get("files") or {}).items():
+                if f.get("err"):
+                    log.info("funnel js %s: fetch err %s", u, f["err"])
+                    continue
+                log.info("funnel js %s (%s bytes, %d hits)",
+                         u, f.get("len"), len(f.get("hits") or []))
+                for h in (f.get("hits") or [])[:30]:
+                    log.info("  | %s", h)
         except Exception as e:  # noqa: BLE001
             log.warning("funnel logic dump failed: %s", e)
 
