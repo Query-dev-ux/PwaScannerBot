@@ -79,6 +79,8 @@ def build_pack(row, pushes, sessions_dir: str) -> str:
                 lines.append(f"  {p['body']}")
             if p.get("url"):
                 lines.append(f"  -> {p['url']}")
+            if not (p.get("title") or p.get("body")) and p.get("raw"):
+                lines.append(f"  raw: {p['raw']}")
             lines.append("")
     txt_path = out_dir / "pushes.txt"
     txt_path.write_text("\n".join(lines), encoding="utf-8")

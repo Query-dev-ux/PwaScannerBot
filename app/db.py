@@ -149,16 +149,36 @@ class Database:
 
     # ---------- pushes ----------
     async def add_push(self, session_id: str, rec: dict[str, Any]) -> bool:
-        """Insert a push, skipping obvious duplicates. Returns True if inserted."""
+        """Insert a push. Collapses the low-level `pushMessaging` event and the
+        `notifications` event for the same push (±1s) into one row, keeping the
+        one that actually has a title/body. Returns True if a row was written."""
+        title, body = rec.get("title"), rec.get("body")
+        has_content = bool((title or "").strip() or (body or "").strip())
+        ts = float(rec["ts"])
         async with self._conn() as db:
             cur = await db.execute(
-                """SELECT 1 FROM pushes
-                   WHERE session_id=? AND CAST(ts AS INT)=CAST(? AS INT)
-                   AND IFNULL(title,'')=IFNULL(?,'') AND IFNULL(body,'')=IFNULL(?,'')""",
-                (session_id, rec["ts"], rec.get("title"), rec.get("body")),
+                """SELECT id, title, body FROM pushes
+                   WHERE session_id=? AND ABS(ts - ?) <= 1
+                   AND IFNULL(service,'') <> 'stage' ORDER BY id""",
+                (session_id, ts),
             )
-            if await cur.fetchone():
-                return False
+            for r in await cur.fetchall():
+                r_has = bool((r["title"] or "").strip() or (r["body"] or "").strip())
+                same = (r["title"] or "") == (title or "") and (r["body"] or "") == (body or "")
+                if same:
+                    return False
+                if r_has and not has_content:
+                    return False  # keep the richer existing row
+                if has_content and not r_has:
+                    await db.execute(
+                        """UPDATE pushes SET ts=?,stage=?,service=?,event=?,
+                           title=?,body=?,icon=?,url=?,raw=? WHERE id=?""",
+                        (rec["ts"], rec.get("stage"), rec.get("service"),
+                         rec.get("event"), title, body, rec.get("icon"),
+                         rec.get("url"), rec.get("raw"), r["id"]),
+                    )
+                    await db.commit()
+                    return True
             await db.execute(
                 """INSERT INTO pushes(session_id,ts,stage,service,event,title,body,icon,url,raw)
                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
