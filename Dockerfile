@@ -24,13 +24,11 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-# non-root; undetected-chromedriver caches the driver under $HOME
-RUN chmod +x entrypoint.sh \
- && useradd -m -u 10001 app \
- && mkdir -p /app/data \
- && chown -R app:app /app
-USER app
+RUN chmod +x entrypoint.sh && mkdir -p /app/data
 
+# Runs as root: Chrome in a container needs --no-sandbox anyway (the code adds
+# it automatically when running as root), and this avoids bind-mount ownership
+# headaches on ./data.
 EXPOSE 8080
 
 ENTRYPOINT ["tini", "--", "./entrypoint.sh"]

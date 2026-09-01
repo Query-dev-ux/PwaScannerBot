@@ -127,10 +127,15 @@ class SessionManager:
         )
         chrome_options.add_argument("--disable-features=WebRtcHideLocalIpsWithMdns")
 
+        # Containers / running as root: Chrome refuses the sandbox, and /dev/shm
+        # is usually tiny.
+        _root = hasattr(os, "geteuid") and os.geteuid() == 0
+        if _root or self.s.headless:
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+
         if self.s.headless:
             chrome_options.add_argument("--headless=new")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-gpu")
 
         chrome_options.page_load_strategy = "eager"
