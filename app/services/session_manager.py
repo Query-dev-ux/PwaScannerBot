@@ -458,16 +458,13 @@ class SessionManager:
                             self._auto_funnel_interaction_sync(driver)
                         except Exception as e:  # noqa: BLE001
                             lines.append(f"  interaction: {esc(str(e))}")
-                        launch = self._launch_pwa(driver, start_url, link_only=True)
+                        launch = self._launch_pwa(
+                            driver, start_url, link_only=True, shot_path=shot)
                         lines.append(
                             f"\n<b>Launch</b>: start_url={esc(start_url)}\n"
                             f"  deep_link={esc(launch['deep_link'])}\n"
-                            f"  {'✅ редирект пойман' if launch['deep_link'] != start_url else '⚠️ редиректа нет — deep_link = start_url'}"
+                            f"  {'✅ редирект пойман (скриншот — страница deep-link)' if launch['deep_link'] != start_url else '⚠️ редиректа нет — deep_link = start_url'}"
                         )
-                        try:
-                            driver.save_screenshot(shot)
-                        except Exception:
-                            pass
                         return
                 lines.append("\n⚠️ Ни одна загрузка не дала воронку с manifest — "
                              "клоака отдаёт заглушку.")
@@ -1391,10 +1388,14 @@ class SessionManager:
     )
 
 
-    def _launch_pwa(self, driver, start_url: str, link_only: bool = False) -> dict:
+    def _launch_pwa(self, driver, start_url: str, link_only: bool = False,
+                    shot_path: str | None = None) -> dict:
         """Open start_url in a fresh tab emulating a PWA launch. Follows the
         redirect chain to the in-app deep link AND (unless link_only) grabs the
-        push subscription the funnel creates on that standalone launch."""
+        push subscription the funnel creates on that standalone launch.
+
+        shot_path: if set, screenshot the launch tab (the deep-link page)
+        right before it's closed."""
         out = {"deep_link": start_url, "push_subscribed": False,
                "push_endpoint": None, "push_by": None}
         if not str(start_url).lower().startswith(("http://", "https://")):
@@ -1553,6 +1554,12 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("pwa launch failed: %s", e)
         finally:
+            if shot_path:
+                try:
+                    time.sleep(2)
+                    driver.save_screenshot(shot_path)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("launch screenshot failed: %s", e)
             try:
                 driver.close()
             except Exception:
