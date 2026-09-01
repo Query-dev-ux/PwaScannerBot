@@ -1082,6 +1082,33 @@ class SessionManager:
 
         time.sleep(3)
 
+        # The cloaker's verdict flip-flops (real funnel <-> white page / shell).
+        # Only the real funnel ships a manifest — reload until we get one.
+        _m, _mu = self._read_manifest(driver, budget_ms=6000)
+        for _try in range(2, 6):
+            if _m:
+                break
+            _bt = ""
+            try:
+                _bt = driver.execute_script(
+                    "return document.body?document.body.innerText:''") or ""
+            except Exception:
+                pass
+            if self._looks_blocked(driver.title or "", _bt):
+                break
+            log.info("navigate: no manifest (try %d) — reloading past cloaker", _try - 1)
+            try:
+                driver.delete_all_cookies()
+            except Exception:
+                pass
+            time.sleep(2)
+            try:
+                driver.get(url)
+            except TimeoutException:
+                pass
+            time.sleep(3)
+            _m, _mu = self._read_manifest(driver, budget_ms=6000)
+
         current_url, page_source = "", ""
         try:
             current_url = driver.current_url or ""
@@ -1147,6 +1174,8 @@ class SessionManager:
 
         # Manifest — fetched from the page (proxy + cookies), not serverside
         manifest, manifest_url = self._read_manifest(driver, budget_ms=8000)
+        if not manifest and _m:
+            manifest, manifest_url = _m, _mu
         if manifest:
             log.info("manifest read: %s", manifest.get("name") or manifest_url)
         else:
@@ -1166,13 +1195,18 @@ class SessionManager:
         )
         scope = manifest.get("scope") or start_url
 
-        # A funnel with no manifest AND an empty <body> is a cloaker decoy /
-        # broken landing — don't burn ~5 min on push-subscription retries.
-        shell = not manifest and len((page_text or "").strip()) < 20
+        # No manifest => not the real funnel. Either an empty shell, or the
+        # cloaker's white-label "review" page (long body, app-store links).
+        # Don't burn ~5 min on push-subscription retries against a decoy.
+        _store = bool(re.search(
+            r"play\.google\.com/store|apps\.apple\.com", page_source))
+        shell = not manifest and (
+            len((page_text or "").strip()) < 20 or _store
+        )
         if shell:
             log.warning(
-                "funnel returned an empty shell (title=%r, no manifest) — "
-                "likely a cloaker decoy; skipping push subscription", page_title,
+                "no manifest (title=%r, store_links=%s) — cloaker decoy / white "
+                "page; skipping push subscription", page_title, _store,
             )
             launch = self._launch_pwa(driver, start_url, link_only=True)
             early = {"subscribed": False, "endpoint": None, "sw": False}
