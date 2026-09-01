@@ -1978,6 +1978,23 @@ class SessionManager:
                     {"origin": origin, "permissions": ["notifications"]})
             except Exception:
                 pass
+            time.sleep(3)
+            try:
+                d = driver.execute_script(
+                    "return {dm: matchMedia('(display-mode: standalone)').matches,"
+                    " sa: navigator.standalone, bip: window.__bipFired||false,"
+                    " ctrl: !!navigator.serviceWorker.controller,"
+                    " url: location.href};") or {}
+                log.info("installed-PWA relaunch state: %s", d)
+            except Exception:
+                pass
+            # run the funnel's own install/CTA flow with trusted clicks — in a
+            # real standalone window some funnels only then call subscribe()
+            try:
+                self._auto_funnel_interaction_sync(driver)
+            except Exception as e:  # noqa: BLE001
+                log.warning("relaunch interaction failed: %s", e)
+
             deadline = time.time() + 50
             while time.time() < deadline:
                 r = self._subscribe_push(driver, start_url, budget_ms=8000)
@@ -1986,6 +2003,14 @@ class SessionManager:
                     log.info("installed-PWA relaunch: subscribed via %s (%s)",
                              r.get("by", "?"), r["endpoint"].split("/")[2])
                     return out
+                try:
+                    sc = driver.execute_script(
+                        "return {n: window.__subCalled||0, v: !!window.__vapidKey};")
+                    if sc and sc.get("n"):
+                        log.info("relaunch: funnel called subscribe() x%s vapid=%s",
+                                 sc["n"], sc["v"])
+                except Exception:
+                    pass
                 time.sleep(3)
             log.info("installed-PWA relaunch: still no subscription")
         except Exception as e:  # noqa: BLE001
