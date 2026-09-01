@@ -1497,6 +1497,9 @@ class SessionManager:
                 pass
             _grant()
 
+            if not link_only:
+                self._hold_and_subscribe_on_launch(driver, origin, out)
+
             # Follow the redirect chain. link_only used to bail the moment the
             # page held still for 3s — which fired BEFORE the funnel's deferred
             # redirect (setTimeout / post-init), so the deep link came back as
@@ -1611,6 +1614,92 @@ class SessionManager:
             except Exception:
                 pass
         return out
+
+    _HOLD_JS = r"""
+    const cb = arguments[arguments.length - 1];
+    (async () => {
+      const report = {held: [], sw: false, subCalled: 0, vapid: false,
+                      endpoint: null};
+      // defer redirects so the funnel's on-launch subscribe() can finish
+      try {
+        const proto = Object.getPrototypeOf(location);
+        for (const m of ['assign', 'replace']) {
+          const orig = location[m].bind(location);
+          location[m] = (u) => { report.held.push(m + ':' + u); };
+        }
+        try {
+          const d = Object.getOwnPropertyDescriptor(proto, 'href');
+          if (d && d.configurable) {
+            Object.defineProperty(proto, 'href', {
+              configurable: true, enumerable: true,
+              get() { return d.get.call(this); },
+              set(v) { report.held.push('href:' + v); },
+            });
+          }
+        } catch (e) {}
+        document.querySelectorAll('meta[http-equiv="refresh" i]')
+          .forEach(m => m.remove());
+      } catch (e) {}
+
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      const deadline = Date.now() + 9000;
+      while (Date.now() < deadline) {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration();
+          if (reg) {
+            report.sw = true;
+            const s = await reg.pushManager.getSubscription();
+            if (s && s.endpoint) { report.endpoint = s.endpoint; break; }
+            if (window.__pushEndpoint) { report.endpoint = window.__pushEndpoint; break; }
+            if (window.__vapidKey && !report.vapid) {
+              report.vapid = true;
+              try {
+                const b64u = (k) => {
+                  const p = '='.repeat((4 - k.length % 4) % 4);
+                  const b = atob((k + p).replace(/-/g, '+').replace(/_/g, '/'));
+                  const a = new Uint8Array(b.length);
+                  for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i);
+                  return a;
+                };
+                const ns = await reg.pushManager.subscribe({
+                  userVisibleOnly: true,
+                  applicationServerKey: b64u(window.__vapidKey),
+                });
+                if (ns && ns.endpoint) { report.endpoint = ns.endpoint; break; }
+              } catch (e) {}
+            }
+          }
+        } catch (e) {}
+        report.subCalled = window.__subCalled || 0;
+        await wait(700);
+      }
+      report.subCalled = window.__subCalled || 0;
+      report.vapid = !!window.__vapidKey;
+      cb(report);
+    })();
+    """
+
+    def _hold_and_subscribe_on_launch(self, driver, origin: str, out: dict) -> None:
+        """Right after the standalone launch, defer the funnel's redirect for a
+        few seconds so its on-launch pushManager.subscribe() can complete, and
+        self-subscribe if it exposes a VAPID key but never calls subscribe."""
+        if out.get("push_endpoint"):
+            return
+        try:
+            if origin_of(driver.current_url or "") != origin:
+                return
+            driver.set_script_timeout(20)
+            r = driver.execute_async_script(self._HOLD_JS) or {}
+            driver.set_script_timeout(12)
+            log.info("launch hold: sw=%s subCalled=%s vapid=%s held=%s ep=%s",
+                     r.get("sw"), r.get("subCalled"), r.get("vapid"),
+                     (r.get("held") or [])[:3],
+                     (r.get("endpoint") or "").split("/")[2] if r.get("endpoint") else None)
+            if r.get("endpoint"):
+                out.update(push_subscribed=True, push_endpoint=r["endpoint"],
+                           push_by="funnel")
+        except Exception as e:  # noqa: BLE001
+            log.warning("launch hold failed: %s", e)
 
     def _log_launch_state(self, driver, origin: str) -> None:
         """Dump what the standalone launch actually rendered when no redirect
