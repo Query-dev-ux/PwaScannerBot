@@ -40,6 +40,7 @@ class InspectResult:
     screenshot: str | None
     deep_link: str | None = None
     push_subscribed: bool = False
+    push_by: str | None = None
 
 
 @dataclass
@@ -358,11 +359,13 @@ class SessionManager:
                 "observer": None,
                 "push_subscribed": info.get("push_subscribed", False),
                 "push_endpoint": info.get("push_endpoint"),
+                "push_by": info.get("push_by"),
             }
 
             return InspectResult(
                 session_id, name, start_url, scope, installable, screenshot,
                 deep_link, bool(info.get("push_subscribed")),
+                info.get("push_by"),
             )
 
         except Exception as e:
@@ -794,6 +797,7 @@ class SessionManager:
         deep_link = launch["deep_link"]
         push_subscribed = early["subscribed"] or launch["push_subscribed"]
         push_endpoint = early["endpoint"] or launch["push_endpoint"]
+        push_by = "funnel" if early["subscribed"] else launch.get("push_by")
         installable = bool(early["sw"]) or push_subscribed
 
         # Park the main tab back on the funnel origin so a later attempt has SW
@@ -824,6 +828,7 @@ class SessionManager:
             "deep_link": deep_link,
             "push_subscribed": push_subscribed,
             "push_endpoint": push_endpoint,
+            "push_by": push_by,
         }
 
     _SUBSCRIBE_JS = r"""
@@ -870,6 +875,38 @@ class SessionManager:
         cb({sw:true, subscribed:false,
             reason: window.__vapidKey ? ('subscribe: ' + lastErr) : 'no-vapid-key'});
       } catch (e) { cb({sw:false, reason:String(e)}); }
+    })();
+    """
+
+    _WAIT_SW_JS = r"""
+    const cb = arguments[arguments.length - 1];
+    (async () => {
+      try {
+        for (let i = 0; i < 25; i++) {
+          const r = await navigator.serviceWorker.getRegistration();
+          if (r && r.active) return cb(true);
+          await new Promise(x => setTimeout(x, 1000));
+        }
+        cb(false);
+      } catch (e) { cb(false); }
+    })();
+    """
+
+    _FUNNEL_SUB_JS = r"""
+    const budgetMs = arguments[0] || 3000;
+    const cb = arguments[arguments.length - 1];
+    (async () => {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (!reg) return cb({});
+        const deadline = Date.now() + budgetMs;
+        do {
+          const s = await reg.pushManager.getSubscription();
+          if (s) return cb({endpoint: s.endpoint});
+          await new Promise(x => setTimeout(x, 1200));
+        } while (Date.now() < deadline);
+        cb({});
+      } catch (e) { cb({}); }
     })();
     """
 
@@ -934,7 +971,8 @@ class SessionManager:
         """Open start_url in a fresh tab emulating a PWA launch. Follows the
         redirect chain to the in-app deep link AND (unless link_only) grabs the
         push subscription the funnel creates on that standalone launch."""
-        out = {"deep_link": start_url, "push_subscribed": False, "push_endpoint": None}
+        out = {"deep_link": start_url, "push_subscribed": False,
+               "push_endpoint": None, "push_by": None}
         if not str(start_url).lower().startswith(("http://", "https://")):
             log.warning("pwa launch: bad start_url %r", start_url)
             return out
@@ -976,11 +1014,33 @@ class SessionManager:
                     r = driver.execute_async_script(self._SUBSCRIBE_JS, budget_ms) or {}
                     driver.set_script_timeout(12)
                     if r.get("endpoint"):
-                        out.update(push_subscribed=True, push_endpoint=r["endpoint"])
+                        out.update(push_subscribed=True, push_endpoint=r["endpoint"],
+                                   push_by=r.get("by") or "self")
                         log.info("pwa launch: push subscribed (%s) %s",
                                  r.get("by"), r["endpoint"].split("/")[2])
                 except Exception as e:  # noqa: BLE001
                     log.warning("sub grab failed: %s", e)
+
+            def _funnel_sub(budget_ms):
+                """Check ONLY for a subscription the funnel itself created
+                (it POSTs that endpoint to its backend -> pushes get delivered;
+                a self-made one does not)."""
+                if out["push_endpoint"]:
+                    return
+                try:
+                    if origin_of(driver.current_url or "") != origin:
+                        return
+                    driver.set_script_timeout(budget_ms / 1000 + 45)
+                    r = driver.execute_async_script(
+                        self._FUNNEL_SUB_JS, budget_ms) or {}
+                    driver.set_script_timeout(12)
+                    if r.get("endpoint"):
+                        out.update(push_subscribed=True, push_endpoint=r["endpoint"],
+                                   push_by="funnel")
+                        log.info("pwa launch: push subscribed (funnel) %s",
+                                 r["endpoint"].split("/")[2])
+                except Exception as e:  # noqa: BLE001
+                    log.warning("funnel-sub check failed: %s", e)
 
             try:
                 driver.get(start_url)
@@ -989,10 +1049,9 @@ class SessionManager:
             _grant()
 
             last, stable, final = None, 0, start_url
-            for i in range(18 if link_only else 30):
-                if (not link_only and not out["push_endpoint"]
-                        and origin_of(driver.current_url or "") == origin):
-                    _grab_sub(3000)
+            for i in range(18 if link_only else 24):
+                if not link_only:
+                    _funnel_sub(2500)
                 time.sleep(1)
                 try:
                     cur = driver.current_url or ""
@@ -1004,7 +1063,7 @@ class SessionManager:
                 if cur == last:
                     stable += 1
                     if stable >= 3 and (redirected or link_only
-                                        or (out["push_endpoint"] and i >= 15)):
+                                        or (out["push_endpoint"] and i >= 12)):
                         break
                 else:
                     stable, last = 0, cur
@@ -1015,15 +1074,43 @@ class SessionManager:
             else:
                 log.info("no redirect on PWA launch - deep link = start_url")
 
-            # subscription may have landed while/after it redirected us away —
-            # check from a plain resource on the funnel origin (SW + sub persist)
             if not link_only and not out["push_endpoint"]:
-                try:
-                    driver.get(origin + "/favicon.ico")
-                    time.sleep(1.5)
-                    _grab_sub(15000)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("post-redirect sub check failed: %s", e)
+                # The funnel fires subscribe() before its SW is active and never
+                # retries. Reload the funnel a couple of times once the SW is
+                # active so it can subscribe for real (and POST to its backend).
+                for rnd in range(3):
+                    try:
+                        driver.get(origin + "/")
+                        time.sleep(2)
+                        _grant()
+                        driver.set_script_timeout(30)
+                        driver.execute_async_script(self._WAIT_SW_JS)
+                        driver.set_script_timeout(12)
+                        driver.get(start_url)
+                        _grant()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("re-launch %d failed: %s", rnd + 1, e)
+                        break
+                    for _ in range(8):
+                        _funnel_sub(2500)
+                        if out["push_endpoint"]:
+                            break
+                        time.sleep(1)
+                    if out["push_endpoint"]:
+                        break
+                    log.info("pwa launch: funnel still not subscribed (round %d)", rnd + 1)
+
+                # absolute last resort — self-subscribe (may not receive pushes)
+                if not out["push_endpoint"]:
+                    try:
+                        driver.get(origin + "/favicon.ico")
+                        time.sleep(1.5)
+                        _grab_sub(15000)
+                        if out["push_endpoint"]:
+                            log.warning("pwa launch: only a SELF subscription — "
+                                        "pushes may not be delivered")
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("self-sub fallback failed: %s", e)
         except Exception as e:  # noqa: BLE001
             log.warning("pwa launch failed: %s", e)
         finally:
@@ -1217,20 +1304,22 @@ class SessionManager:
 
         driver = sess["driver"]
 
-        # If the scan didn't land a subscription, try again: first on the funnel
-        # page (yap-games style), then via a standalone PWA launch (fake-store
-        # style — that's the only place they subscribe).
-        if not sess.get("push_subscribed"):
+        # Retry unless we already have a FUNNEL-made subscription (a self-made
+        # one is never registered with the funnel's backend, so it gets no
+        # pushes — keep trying for a real one).
+        if sess.get("push_by") != "funnel":
             sub = await asyncio.to_thread(
                 self._subscribe_push, driver, sess["start_url"], 30000, True
             )
             if sub["subscribed"]:
-                sess["push_subscribed"] = True
-                sess["push_endpoint"] = sub.get("endpoint")
+                sess.update(push_subscribed=True, push_endpoint=sub.get("endpoint"),
+                            push_by="funnel")
             else:
                 launch = await asyncio.to_thread(self._launch_pwa, driver, sess["start_url"])
-                sess["push_subscribed"] = launch["push_subscribed"]
-                sess["push_endpoint"] = launch.get("push_endpoint")
+                if launch["push_subscribed"]:
+                    sess.update(push_subscribed=True,
+                                push_endpoint=launch.get("push_endpoint"),
+                                push_by=launch.get("push_by"))
 
         expires_at = time.time() + self.s.collect_seconds
         sess.update(collecting=True, stage=STAGE_INSTALL, expires_at=expires_at)
@@ -1259,8 +1348,8 @@ class SessionManager:
 
         await asyncio.to_thread(self._start_observer, session_id, sess)
 
-        # push subscription is done -> drop the pricey scan proxy
-        if sess.get("push_subscribed"):
+        # a real (funnel-made) subscription -> the scan proxy is no longer needed
+        if sess.get("push_by") == "funnel":
             await self._swap_to_hold(sess)
 
         return PushInfo(
@@ -1358,15 +1447,15 @@ class SessionManager:
                     log.warning("add_push failed: %s", e)
 
     async def retry_subscriptions(self) -> None:
-        """These funnels subscribe to push non-deterministically. For the first
-        ~30 min of a collecting session keep retrying a standalone PWA launch
-        until a subscription lands; then move the session to the hold proxy."""
+        """Keep retrying the standalone PWA launch until the FUNNEL itself
+        subscribes (only then is the endpoint registered with its backend and
+        pushes actually arrive). Then move the session to the hold proxy."""
         now = time.time()
         for sid, sess in list(self._sessions.items()):
             if not sess.get("collecting") or sess.get("stage") != STAGE_INSTALL:
                 continue
             aged_out = now - sess.get("scanned_at", now) > 1800
-            if sess.get("push_subscribed") or aged_out:
+            if sess.get("push_by") == "funnel" or aged_out:
                 # nothing more to try — release the scan proxy
                 await self._swap_to_hold(sess)
                 continue
@@ -1380,12 +1469,17 @@ class SessionManager:
                 log.warning("retry_subscriptions %s: %s", sid[:8], e)
                 continue
             if launch.get("push_subscribed"):
+                was = sess.get("push_by")
                 sess["push_subscribed"] = True
                 sess["push_endpoint"] = launch.get("push_endpoint")
+                sess["push_by"] = launch.get("push_by")
                 await self.db.set_session_fields(
                     sid, push_subscribed=1, push_endpoint=launch.get("push_endpoint")
                 )
-                log.info("retry_subscriptions: %s subscribed", sid[:8])
+                log.info("retry_subscriptions: %s subscribed (%s)",
+                         sid[:8], launch.get("push_by"))
+                if was == launch.get("push_by"):
+                    continue  # already told the user about this one
                 try:
                     await self.bot.send_message(
                         sess["chat_id"],
