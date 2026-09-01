@@ -687,17 +687,20 @@ class SessionManager:
         )
         scope = manifest.get("scope") or start_url
 
-        # Push: first best-effort attempt now, while we're on the real funnel
-        # page (its SW is registered here). Re-navigating later can hit the
-        # cloaker decoy.
-        sub = self._subscribe_push(driver, url, budget_ms=12000)
-        installable = sub["sw"]
+        # Best-effort: if the funnel subscribes on the normal page (yap-games
+        # style), grab it now.
+        early = self._subscribe_push(driver, url, budget_ms=8000)
 
-        # Resolve the URL that opens *inside* the installed app.
-        deep_link = self._extract_pwa_link(driver, start_url)
+        # Simulate the PWA launch: resolve the in-app deep link AND collect the
+        # push subscription that fake-store funnels create only in standalone.
+        launch = self._launch_pwa(driver, start_url)
+        deep_link = launch["deep_link"]
+        push_subscribed = early["subscribed"] or launch["push_subscribed"]
+        push_endpoint = early["endpoint"] or launch["push_endpoint"]
+        installable = bool(early["sw"]) or push_subscribed
 
-        # Park the main tab back on the funnel origin so the subscription can be
-        # completed/verified at enable-time without re-triggering the cloaker.
+        # Park the main tab back on the funnel origin so a later attempt has SW
+        # context without re-triggering the cloaker.
         try:
             if origin_of(driver.current_url or "") != origin_of(start_url):
                 driver.get(start_url)
@@ -722,8 +725,8 @@ class SessionManager:
             "name": name,
             "scope": scope,
             "deep_link": deep_link,
-            "push_subscribed": sub["subscribed"],
-            "push_endpoint": sub["endpoint"],
+            "push_subscribed": push_subscribed,
+            "push_endpoint": push_endpoint,
         }
 
     _SUBSCRIBE_JS = r"""
@@ -829,12 +832,43 @@ class SessionManager:
         "try{Object.defineProperty(navigator,'standalone',{get:()=>true});}catch(e){}})();"
     )
 
-    def _extract_pwa_link(self, driver, start_url: str) -> str | None:
-        """Open start_url in a fresh tab emulating a PWA launch, follow the
-        redirect chain, and return the URL the app actually lands on."""
-        from selenium.webdriver.common.by import By  # noqa: F401
+    _QUICK_SUB_JS = r"""
+    const cb = arguments[arguments.length - 1];
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    function b64u(s){s=String(s).replace(/-/g,'+').replace(/_/g,'/');
+      s+='='.repeat((4-s.length%4)%4);const b=atob(s),u=new Uint8Array(b.length);
+      for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u;}
+    (async () => {
+      try {
+        let reg = null;
+        for (let i = 0; i < 8; i++) {
+          reg = await navigator.serviceWorker.getRegistration();
+          if (reg && reg.active) break;
+          await wait(700);
+        }
+        if (!reg || !reg.active) return cb({});
+        let s = await reg.pushManager.getSubscription();
+        if (s) return cb({endpoint: s.endpoint, by: 'funnel'});
+        if (window.__vapidKey) {
+          try {
+            s = await reg.pushManager.subscribe({
+              userVisibleOnly: true, applicationServerKey: b64u(window.__vapidKey)});
+            return cb({endpoint: s.endpoint, by: 'self'});
+          } catch (e) {}
+        }
+        cb({});
+      } catch (e) { cb({}); }
+    })();
+    """
 
+    def _launch_pwa(self, driver, start_url: str) -> dict:
+        """Open start_url in a fresh tab emulating a PWA launch. Follows the
+        redirect chain to the in-app deep link AND grabs the push subscription
+        the funnel creates on that standalone launch (fake-store funnels only
+        subscribe here, not on the normal page)."""
+        out = {"deep_link": start_url, "push_subscribed": False, "push_endpoint": None}
         original = None
+        origin = origin_of(start_url)
         try:
             original = driver.current_window_handle
             driver.switch_to.new_window("tab")
@@ -843,10 +877,15 @@ class SessionManager:
                     "Page.addScriptToEvaluateOnNewDocument",
                     {"source": self._STANDALONE_SPOOF_JS},
                 )
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {"origin": origin, "permissions": ["notifications"]},
+                )
             except Exception as e:  # noqa: BLE001
-                log.warning("standalone spoof inject failed: %s", e)
+                log.warning("standalone/grant inject failed: %s", e)
 
             driver.set_page_load_timeout(45)
+            driver.set_script_timeout(12)
             try:
                 driver.get(start_url)
             except TimeoutException:
@@ -854,7 +893,20 @@ class SessionManager:
 
             last, stable = None, 0
             final = start_url
-            for _ in range(30):
+            for i in range(32):
+                if not out["push_endpoint"]:
+                    try:
+                        if origin_of(driver.current_url or "") == origin:
+                            r = driver.execute_async_script(self._QUICK_SUB_JS) or {}
+                            if r.get("endpoint"):
+                                out["push_endpoint"] = r["endpoint"]
+                                out["push_subscribed"] = True
+                                log.info(
+                                    "pwa launch: push subscribed (%s) %s",
+                                    r.get("by"), r["endpoint"].split("/")[2],
+                                )
+                    except Exception:
+                        pass
                 time.sleep(1)
                 try:
                     cur = driver.current_url or ""
@@ -864,21 +916,19 @@ class SessionManager:
                     final = cur
                 if cur == last:
                     stable += 1
-                    if stable >= 3:
+                    if stable >= 3 and (out["push_endpoint"] or i >= 12):
                         break
                 else:
                     stable, last = 0, cur
 
             norm = lambda u: (u or "").rstrip("/").split("#")[0]
             if norm(final) and norm(final) != norm(start_url):
+                out["deep_link"] = final
                 log.info("pwa deep link: %s", final)
-                deep = final
             else:
                 log.info("no redirect on PWA launch - deep link = start_url")
-                deep = start_url
         except Exception as e:  # noqa: BLE001
-            log.warning("deep link extraction failed: %s", e)
-            deep = None
+            log.warning("pwa launch failed: %s", e)
         finally:
             try:
                 driver.close()
@@ -891,9 +941,10 @@ class SessionManager:
                 pass
             try:
                 driver.set_page_load_timeout(60)
+                driver.set_script_timeout(20)
             except Exception:
                 pass
-        return deep
+        return out
 
     def _wait_for_funnel(self, driver, timeout: float = 45.0) -> None:
         """Wait for the funnel's game/loader to finish and CTA to appear."""
@@ -1069,15 +1120,20 @@ class SessionManager:
 
         driver = sess["driver"]
 
-        # Finish the push subscription. The funnel usually calls subscribe()
-        # late, so give it a longer budget here; navigate back to the funnel
-        # origin if the browser drifted off it.
+        # If the scan didn't land a subscription, try again: first on the funnel
+        # page (yap-games style), then via a standalone PWA launch (fake-store
+        # style — that's the only place they subscribe).
         if not sess.get("push_subscribed"):
             sub = await asyncio.to_thread(
-                self._subscribe_push, driver, sess["start_url"], 50000, True
+                self._subscribe_push, driver, sess["start_url"], 30000, True
             )
-            sess["push_subscribed"] = sub["subscribed"]
-            sess["push_endpoint"] = sub.get("endpoint")
+            if sub["subscribed"]:
+                sess["push_subscribed"] = True
+                sess["push_endpoint"] = sub.get("endpoint")
+            else:
+                launch = await asyncio.to_thread(self._launch_pwa, driver, sess["start_url"])
+                sess["push_subscribed"] = launch["push_subscribed"]
+                sess["push_endpoint"] = launch.get("push_endpoint")
 
         expires_at = time.time() + self.s.collect_seconds
         sess.update(collecting=True, stage=STAGE_INSTALL, expires_at=expires_at)
