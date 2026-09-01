@@ -150,10 +150,15 @@ class SessionManager:
             log.info("using proxy: %s", proxy_url)
 
         # Accept-Language must match the proxy geo (funnels filter on it).
+        # NOTE: intl.accept_languages wants a plain comma list of tags
+        # ("es-PE,es,en") — feeding it the header string with q-values makes
+        # navigator.languages come out as ["es-PE","es;q=0.9",...].
         locale, accept_lang = self._lang_for_geo(geo)
+        tags = self._lang_tags(accept_lang)
         chrome_options.add_argument(f"--lang={locale}")
+        chrome_options.add_argument(f"--accept-lang={tags}")
         chrome_options.add_experimental_option(
-            "prefs", {"intl.accept_languages": accept_lang}
+            "prefs", {"intl.accept_languages": tags}
         )
 
         # Mobile viewport. The real Android UA + consistent Sec-CH-UA client
@@ -174,6 +179,17 @@ class SessionManager:
         lang, accept_lang = self._LANG_BY_CC.get(cc, ("en", "en-US,en;q=0.9"))
         locale = f"{lang}-{cc}" if cc else "en-US"
         return locale, accept_lang
+
+    @staticmethod
+    def _lang_tags(accept_lang: str) -> str:
+        """'es-PE,es;q=0.9,en;q=0.8' -> 'es-PE,es,en'"""
+        seen, out = set(), []
+        for part in accept_lang.split(","):
+            t = part.split(";")[0].strip()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        return ",".join(out)
 
     async def extract_link(self, proxy: dict | None, url: str) -> dict:
         """Fast path: pass the cloaker, resolve the in-app deep link, close.
@@ -509,6 +525,8 @@ class SessionManager:
     _STEALTH_JS = """
     (() => {
       try { Object.defineProperty(navigator, 'webdriver', {get: () => false}); } catch (e) {}
+      // real Android reports a touchscreen
+      try { Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 5}); } catch (e) {}
       try {
         if (!window.chrome) window.chrome = {};
         if (!window.chrome.runtime) window.chrome.runtime = {};
@@ -569,6 +587,9 @@ class SessionManager:
         """
         cc = (geo or {}).get("country_code") or ""
         locale, accept_lang = self._lang_for_geo(geo)
+        # CDP acceptLanguage / prefs want plain tags — Chrome adds the q-values.
+        # Passing the header string ("es;q=0.9") gets it doubled ("es;q=0.9;q=0.9").
+        lang_tags = self._lang_tags(accept_lang)
         tz = (geo or {}).get("timezone")
 
         # Emulate a real Android Chrome: UA + FULL userAgentMetadata so the
@@ -598,7 +619,7 @@ class SessionManager:
                 "Network.setUserAgentOverride",
                 {
                     "userAgent": mobile_ua,
-                    "acceptLanguage": accept_lang,
+                    "acceptLanguage": lang_tags,
                     "platform": "Linux armv8l",
                     "userAgentMetadata": {
                         "brands": brands,
@@ -660,12 +681,23 @@ class SessionManager:
             driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument", {"source": self._STEALTH_JS}
             )
+            # navigator.languages must be clean tags, not the Accept-Language
+            # header string (Chrome's pref handling can mangle it).
+            langs = self._lang_tags(accept_lang).split(",")
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source":
+                 "try{Object.defineProperty(navigator,'languages',"
+                 f"{{get:()=>{json.dumps(langs)}}});}}catch(e){{}}"
+                 "try{Object.defineProperty(navigator,'language',"
+                 f"{{get:()=>{json.dumps(langs[0])}}});}}catch(e){{}}"},
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("stealth script inject failed: %s", e)
 
         log.info(
-            "stealth applied: cc=%s tz=%s locale=%s ua=Android/Chrome %s",
-            cc or "?", tz or "?", locale, major,
+            "stealth applied: cc=%s tz=%s locale=%s langs=%s ua=Android/Chrome %s",
+            cc or "?", tz or "?", locale, self._lang_tags(accept_lang), major,
         )
 
     def _navigate_and_inspect(
