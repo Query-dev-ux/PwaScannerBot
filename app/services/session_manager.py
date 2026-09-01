@@ -304,6 +304,18 @@ class SessionManager:
                 self._apply_stealth(driver, geo)
                 cur, title, manifest, murl = _load_past_cloaker()
 
+                # Let the funnel finish loading and run its install flow — some
+                # funnels only arm the standalone-launch redirect after the CTA
+                # is clicked. This is what the pre-split single "Scan" did.
+                try:
+                    self._auto_funnel_interaction_sync(driver)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("funnel interaction failed: %s", e)
+
+                try:
+                    cur = driver.current_url or cur
+                except Exception:
+                    pass
                 base = cur if cur.startswith("http") else url
                 start_url = urljoin(base, "/")
                 if manifest.get("start_url"):
@@ -1159,8 +1171,13 @@ class SessionManager:
                 pass
             _grant()
 
+            # Follow the redirect chain. link_only used to bail the moment the
+            # page held still for 3s — which fired BEFORE the funnel's deferred
+            # redirect (setTimeout / post-init), so the deep link came back as
+            # start_url. Now both modes wait out the chain; we only stop early
+            # once we've actually landed somewhere other than start_url.
             last, stable, final = None, 0, start_url
-            for i in range(18 if link_only else 24):
+            for i in range(24):
                 if not link_only:
                     _funnel_sub(2500)
                 time.sleep(1)
@@ -1170,11 +1187,17 @@ class SessionManager:
                     break
                 if cur and not cur.startswith("about:"):
                     final = cur
-                redirected = origin_of(cur) != origin and norm(cur) != norm(start_url)
+                redirected = (
+                    bool(cur) and not cur.startswith("about:")
+                    and norm(cur) != norm(start_url)
+                )
                 if cur == last:
                     stable += 1
-                    if stable >= 3 and (redirected or link_only
-                                        or (out["push_endpoint"] and i >= 12)):
+                    if stable >= 3 and (
+                        redirected
+                        or (link_only and i >= 14)
+                        or (out["push_endpoint"] and i >= 12)
+                    ):
                         break
                 else:
                     if cur != start_url:
