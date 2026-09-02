@@ -2523,18 +2523,19 @@ class SessionManager:
 
         driver = sess["driver"]
 
-        # Retry unless we already have a FUNNEL-made subscription (a self-made
-        # one is never registered with the funnel's backend, so it gets no
-        # pushes — keep trying for a real one).
-        if sess.get("push_by") != "funnel":
-            # VAPP funnels: subscribe with the key from the pwa_ HTML meta
+        # Only chase a subscription if the scan produced NONE. If we already
+        # have one, leave it alone — for this funnel family the funnel's own
+        # SDK does the backend registration on page load, and our extra
+        # re-subscribe / --app-relaunch attempts were DESTROYING working subs
+        # (fresh profile, SW re-register).
+        if not sess.get("push_subscribed"):
             va = await asyncio.to_thread(
                 self._vapp_subscribe, driver, sess["start_url"])
             if va.get("endpoint"):
                 sess.update(push_subscribed=True, push_endpoint=va["endpoint"],
                             push_by="funnel")
 
-        if sess.get("push_by") != "funnel":
+        if not sess.get("push_subscribed"):
             sub = await asyncio.to_thread(
                 self._subscribe_push, driver, sess["start_url"], 30000, True
             )
@@ -2548,10 +2549,9 @@ class SessionManager:
                                 push_endpoint=launch.get("push_endpoint"),
                                 push_by=launch.get("push_by"))
 
-        # Last resort: relaunch the browser as an installed PWA (--app mode).
-        # Some funnels only show the push prompt from that real standalone
-        # context. This replaces sess["driver"].
-        if sess.get("push_by") != "funnel":
+        # Last resort — relaunch as an installed PWA (--app, fresh profile).
+        # ONLY when we have nothing: this replaces sess["driver"] and profile.
+        if not sess.get("push_subscribed"):
             r = await asyncio.to_thread(self._reopen_as_installed_pwa, sess)
             if r["subscribed"]:
                 sess.update(push_subscribed=True, push_endpoint=r["endpoint"],
@@ -2847,8 +2847,9 @@ class SessionManager:
             if sess.get("stage") != STAGE_INSTALL:
                 continue
             aged_out = now - sess.get("scanned_at", now) > 1800
-            if sess.get("push_by") == "funnel" or aged_out:
-                # nothing more to try — release the scan proxy
+            if sess.get("push_subscribed") or aged_out:
+                # we have a subscription (or gave up) — release the scan proxy,
+                # don't keep re-launching the PWA (it churns the SW/subscription)
                 await self._swap_to_hold(sess)
                 continue
             if sess.get("ctl_active"):
