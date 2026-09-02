@@ -208,14 +208,17 @@ class CdpBridge:
                     log.debug("frame sink error: %s", e)
         elif method == "BackgroundService.backgroundServiceEventReceived":
             ev = params.get("backgroundServiceEvent") or {}
-            # the same event is broadcast once per armed target — de-dupe
+            # the same event is broadcast once per armed target AND replayed in
+            # full every time we reconnect + re-arm — de-dupe across the whole
+            # session so a reconnect doesn't re-log hours-old events as new.
             key = "%s|%s|%s" % (ev.get("service"), ev.get("eventName"),
                                 ev.get("instanceId") or ev.get("timestamp"))
-            now = time.time()
-            self._seen = {k: t for k, t in self._seen.items() if now - t < 120}
             if key in self._seen:
                 return
-            self._seen[key] = now
+            self._seen[key] = time.time()
+            if len(self._seen) > 5000:
+                for k in sorted(self._seen, key=self._seen.get)[:2000]:
+                    self._seen.pop(k, None)
             try:
                 self._on_event(self._normalize(ev))
             except Exception as e:  # noqa: BLE001
