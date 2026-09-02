@@ -148,6 +148,12 @@ class SessionManager:
         chrome_options.add_argument(
             "--force-webrtc-ip-handling-policy=default_public_interface_only"
         )
+        # route web notifications to the system (D-Bus / dunst) server, not
+        # Chrome's own message-center UI which never renders under Xvfb — if a
+        # push results in no visible notification Chrome revokes the
+        # userVisibleOnly subscription ("Unsubscribed due to error").
+        chrome_options.add_argument(
+            "--enable-features=SystemNotifications,NativeNotifications")
         chrome_options.add_argument("--disable-features=WebRtcHideLocalIpsWithMdns")
         # keep the footprint small — sessions hold a live Chrome for 7 days.
         # NB: do NOT disable background networking — FCM push rides on it.
