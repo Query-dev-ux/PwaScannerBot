@@ -208,25 +208,36 @@ class CdpBridge:
                     log.debug("frame sink error: %s", e)
         elif method == "BackgroundService.backgroundServiceEventReceived":
             ev = params.get("backgroundServiceEvent") or {}
-            # the same event is broadcast once per armed target AND replayed in
-            # full every time we reconnect + re-arm — de-dupe across the whole
-            # session so a reconnect doesn't re-log hours-old events as new.
-            key = "%s|%s|%s" % (ev.get("service"), ev.get("eventName"),
-                                ev.get("instanceId") or ev.get("timestamp"))
+            name = ev.get("eventName") or ""
             _md = {m.get("key"): m.get("value")
                    for m in (ev.get("eventMetadata") or [])}
-            log.info("cdp bg-event: svc=%s name=%s inst=%s dup=%s meta=%s",
-                     ev.get("service"), ev.get("eventName"),
-                     ev.get("instanceId"), key in self._seen,
+            log.info("cdp bg-event: svc=%s name=%s inst=%s meta=%s",
+                     ev.get("service"), name, ev.get("instanceId"),
                      {k: v for k, v in _md.items() if k != "Payload"})
-            if key in self._seen:
+            # ONE push generates 4-5 lifecycle events (received / dispatched /
+            # displayed / completed) across the pushMessaging + notifications
+            # services. Keep only the content-bearing ones, then de-dupe by
+            # (title, body) within a time bucket so a push = ONE record.
+            if name not in ("Push message received", "Notification displayed",
+                            "Notification clicked"):
+                return
+            rec = self._normalize(ev)
+            if name == "Push message received" and not (
+                    (rec.get("title") or "").strip()
+                    or (rec.get("body") or "").strip()):
+                return  # payload-less receipt — wait for "Notification displayed"
+            bucket = int(float(rec.get("ts") or time.time()) // 8)
+            key = "push|%s|%s|%s" % (
+                rec.get("title"), rec.get("body"), bucket)
+            if key in self._seen or "push|%s|%s|%s" % (
+                    rec.get("title"), rec.get("body"), bucket - 1) in self._seen:
                 return
             self._seen[key] = time.time()
             if len(self._seen) > 5000:
                 for k in sorted(self._seen, key=self._seen.get)[:2000]:
                     self._seen.pop(k, None)
             try:
-                self._on_event(self._normalize(ev))
+                self._on_event(rec)
             except Exception as e:  # noqa: BLE001
                 log.warning("cdp-bridge on_event failed: %s", e)
         elif "result" in msg and isinstance(msg["result"], dict):
