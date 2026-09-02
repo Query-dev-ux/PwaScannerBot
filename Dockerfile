@@ -2,7 +2,13 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    DISPLAY=:99 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session
+# ^ baked into the image so EVERY process (chromedriver, Chrome, its zygotes)
+#   inherits them — undetected-chromedriver's detached launch doesn't reliably
+#   propagate env set at runtime, and Chrome needs DBUS_SESSION_BUS_ADDRESS to
+#   reach the notification daemon (else it revokes push subs after 1 push).
 
 # Google Chrome + its runtime libs + Xvfb (for the optional headful mode)
 RUN apt-get update && apt-get install -y --no-install-recommends \

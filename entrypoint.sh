@@ -1,34 +1,35 @@
 #!/bin/sh
 set -e
 
-# HEADLESS=false -> run Chrome headful inside a virtual display (better against
-# client-side anti-bot). Otherwise run plain headless.
+# DISPLAY and DBUS_SESSION_BUS_ADDRESS are baked into the image (Dockerfile ENV)
+# so every process — including Chrome and its zygotes — inherits them. Here we
+# only bring up the servers they point at.
+
 if [ "${HEADLESS}" = "false" ]; then
-  # Start Xvfb directly (no xvfb-run / xauth dependency). tini (PID 1) reaps it.
   rm -f /tmp/.X99-lock
   Xvfb :99 -screen 0 1280x2000x24 -ac -nolisten tcp >/tmp/xvfb.log 2>&1 &
-  export DISPLAY=:99
   for i in $(seq 1 25); do
     [ -e /tmp/.X11-unix/X99 ] && break
     sleep 0.2
   done
+else
+  unset DISPLAY   # headless Chrome must not try to reach an X server
 fi
 
-# Session D-Bus on a FIXED socket + a notification daemon, so Chrome's
-# showNotification() gets acknowledged. Without a visible notification Chrome
-# REVOKES userVisibleOnly push subscriptions after the first push
-# ("Unsubscribed due to error"). The fixed path lets the Python side hand the
-# exact address to Chrome (chromedriver doesn't reliably propagate env).
+# Session D-Bus on the fixed socket + a notification daemon. Without a
+# displayable notification Chrome REVOKES userVisibleOnly push subscriptions
+# after the first push ("Unsubscribed due to error").
 if command -v dbus-daemon >/dev/null 2>&1; then
   rm -f /tmp/dbus-session
   dbus-daemon --session --nofork --nopidfile \
       --address=unix:path=/tmp/dbus-session >/tmp/dbus.log 2>&1 &
-  export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session
   for i in $(seq 1 25); do
     [ -S /tmp/dbus-session ] && break
     sleep 0.2
   done
-  if [ -n "${DISPLAY}" ] && command -v dunst >/dev/null 2>&1; then
+  if [ "${HEADLESS}" != "false" ]; then
+    :
+  elif command -v dunst >/dev/null 2>&1; then
     dunst >/tmp/dunst.log 2>&1 &
   fi
 fi
