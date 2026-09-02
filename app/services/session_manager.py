@@ -1353,38 +1353,38 @@ class SessionManager:
         shell = not manifest and (
             len((page_text or "").strip()) < 20 or _store
         )
+        early = {"subscribed": False, "endpoint": None, "sw": False}
+        push_subscribed = push_endpoint = None
+        push_by = None
         if shell:
             log.warning(
                 "no manifest (title=%r, store_links=%s) — cloaker decoy / white "
                 "page; skipping push subscription", page_title, _store,
             )
             launch = self._launch_pwa(driver, start_url, link_only=True)
-            early = {"subscribed": False, "endpoint": None, "sw": False}
         else:
-            # Best-effort: if the funnel subscribes on the normal page
-            # (yap-games style), grab it now.
-            early = self._subscribe_push(driver, url, budget_ms=8000)
-            # Simulate the PWA launch: resolve the in-app deep link AND collect
-            # the push subscription (fake-store funnels only subscribe here).
-            launch = self._launch_pwa(driver, start_url)
-        deep_link = launch["deep_link"]
-        nav_chain = launch.get("chain") or []
-        push_subscribed = early["subscribed"] or launch["push_subscribed"]
-        push_endpoint = early["endpoint"] or launch["push_endpoint"]
-        push_by = "funnel" if early["subscribed"] else launch.get("push_by")
-        installable = bool(early["sw"]) or push_subscribed
-
-        # VAPP funnels (newlifejoker.club family): the pwa_<uuid> HTML carries
-        # <meta va_app_public_key> + <meta user_id>. The Vue app redirects to
-        # the casino before it can subscribe, but we don't need it to — do the
-        # subscribe ourselves with that key and POST it to /subscribe exactly
-        # like their VappWorker/PwaWorker do.
-        if not push_subscribed and manifest:
+            # This whole funnel family (yap-games / mainggames / newlifejoker /
+            # nequ) ships <meta va_app_public_key> on the pwa_ page and a push
+            # worker at /push/vapp/VappWorker.js. Subscribe THAT way first — it
+            # registers a push-capable SW and POSTs to /subscribe. The funnel's
+            # own in-page subscribe often lands on a push-less SW → Chrome kills
+            # it after the first push ("Unsubscribed due to error").
             va = self._vapp_subscribe(driver, start_url)
             if va.get("endpoint"):
                 push_subscribed = True
                 push_endpoint = va["endpoint"]
                 push_by = "funnel"
+                launch = self._launch_pwa(driver, start_url, link_only=True)
+            else:
+                early = self._subscribe_push(driver, url, budget_ms=8000)
+                launch = self._launch_pwa(driver, start_url)
+
+        deep_link = launch["deep_link"]
+        nav_chain = launch.get("chain") or []
+        push_subscribed = push_subscribed or early["subscribed"] or launch["push_subscribed"]
+        push_endpoint = push_endpoint or early["endpoint"] or launch["push_endpoint"]
+        push_by = push_by or ("funnel" if early["subscribed"] else launch.get("push_by"))
+        installable = bool(early["sw"]) or push_subscribed
 
         # The push prompt is shown by an intermediate "PWA service" domain
         # (e.g. yapegamenew.club) that sits between the funnel and the casino
@@ -2645,13 +2645,64 @@ class SessionManager:
                 except Exception as e:  # noqa: BLE001
                     log.warning("add_push failed: %s", e)
 
+    _SUB_ALIVE_JS = r"""
+    const cb = arguments[arguments.length - 1];
+    (async () => {
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) {
+          const s = await r.pushManager.getSubscription();
+          if (s && s.endpoint) return cb({alive: true, endpoint: s.endpoint});
+        }
+        cb({alive: false});
+      } catch (e) { cb({alive: false, err: String(e)}); }
+    })();
+    """
+
+    def _subscription_alive(self, driver, origin: str) -> dict:
+        try:
+            if origin_of(driver.current_url or "") != origin:
+                driver.get(origin + "/")
+                time.sleep(2)
+            driver.set_script_timeout(20)
+            r = driver.execute_async_script(self._SUB_ALIVE_JS) or {}
+            driver.set_script_timeout(20)
+            return r
+        except Exception as e:  # noqa: BLE001
+            log.warning("sub-alive check failed: %s", e)
+            return {"alive": True}  # don't heal on a probe error
+
     async def retry_subscriptions(self) -> None:
         """Keep retrying the standalone PWA launch until the FUNNEL itself
         subscribes (only then is the endpoint registered with its backend and
-        pushes actually arrive). Then move the session to the hold proxy."""
+        pushes actually arrive). Then move the session to the hold proxy.
+        Also heal subscriptions Chrome revoked ("Unsubscribed due to error")."""
         now = time.time()
         for sid, sess in list(self._sessions.items()):
-            if not sess.get("collecting") or sess.get("stage") != STAGE_INSTALL:
+            if not sess.get("collecting"):
+                continue
+
+            # health check for already-subscribed sessions (any stage),
+            # throttled to ~every 18 min, skipped while parked / in use
+            last = sess.get("_sub_check_at", 0)
+            if (sess.get("push_by") == "funnel" and not sess.get("ctl_active")
+                    and not sess.get("parked") and now - last > 1080):
+                sess["_sub_check_at"] = now
+                origin = origin_of(sess["start_url"])
+                st = await asyncio.to_thread(
+                    self._subscription_alive, sess["driver"], origin)
+                if not st.get("alive"):
+                    log.warning("session %s subscription gone — re-subscribing",
+                                sid[:8])
+                    va = await asyncio.to_thread(
+                        self._vapp_subscribe, sess["driver"], sess["start_url"])
+                    if va.get("endpoint"):
+                        sess["push_endpoint"] = va["endpoint"]
+                        await self.db.set_session_fields(
+                            sid, push_subscribed=1, push_endpoint=va["endpoint"])
+                        log.info("session %s re-subscribed", sid[:8])
+
+            if sess.get("stage") != STAGE_INSTALL:
                 continue
             aged_out = now - sess.get("scanned_at", now) > 1800
             if sess.get("push_by") == "funnel" or aged_out:

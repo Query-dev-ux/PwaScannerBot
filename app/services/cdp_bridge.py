@@ -34,6 +34,7 @@ class CdpBridge:
         self._page_sessions: list[str] = []
         self._frame_sink: FrameSink | None = None
         self._lock = threading.Lock()
+        self._seen: dict[str, float] = {}  # instanceId -> ts, de-dupe broadcasts
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -207,6 +208,14 @@ class CdpBridge:
                     log.debug("frame sink error: %s", e)
         elif method == "BackgroundService.backgroundServiceEventReceived":
             ev = params.get("backgroundServiceEvent") or {}
+            # the same event is broadcast once per armed target — de-dupe
+            key = "%s|%s|%s" % (ev.get("service"), ev.get("eventName"),
+                                ev.get("instanceId") or ev.get("timestamp"))
+            now = time.time()
+            self._seen = {k: t for k, t in self._seen.items() if now - t < 120}
+            if key in self._seen:
+                return
+            self._seen[key] = now
             try:
                 self._on_event(self._normalize(ev))
             except Exception as e:  # noqa: BLE001
