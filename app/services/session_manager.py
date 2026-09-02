@@ -3005,5 +3005,101 @@ class SessionManager:
                 await self._teardown_session(self._sessions.pop(sid, None))
 
     async def restore(self) -> None:
-        """Restore active sessions after restart (skipped for undetected-chromedriver)."""
-        log.info("restore skipped (undetected-chromedriver sessions)")
+        """Relaunch the browser for every still-collecting session after a
+        restart. The push subscription + SW live in the Chrome profile
+        (profile_dir), so a fresh Chrome on the same user-data-dir picks them
+        back up; we just need it running again for the FCM connection + the
+        CDP observer."""
+        try:
+            rows = await self.db.list_collecting()
+        except Exception as e:  # noqa: BLE001
+            log.warning("restore: list_collecting failed: %s", e)
+            return
+        now = time.time()
+        done = 0
+        for row in rows:
+            if row["expires_at"] and row["expires_at"] <= now:
+                continue
+            if len(self._sessions) >= self.s.max_sessions:
+                log.warning("restore: max_sessions reached, %d left unrestored",
+                            len(rows) - done)
+                break
+            try:
+                await self._restore_one(row)
+                done += 1
+                await asyncio.sleep(3)  # stagger the Chrome launches
+            except Exception as e:  # noqa: BLE001
+                log.exception("restore %s failed: %s", row["id"][:8], e)
+                try:
+                    await self.bot.send_message(
+                        row["chat_id"],
+                        f"⚠️ Не удалось восстановить сессию "
+                        f"<b>{esc(row['pwa_name'])}</b> после перезапуска. "
+                        "Собранное сохранено (📦 архив), для продолжения — "
+                        "пересканируй.",
+                    )
+                except Exception:
+                    pass
+        log.info("restore: %d/%d collecting session(s) back up", done, len(rows))
+
+    async def _restore_one(self, row) -> None:
+        sid = row["id"]
+        profile_dir = row["profile_dir"]
+        if not profile_dir or not Path(profile_dir).exists():
+            raise RuntimeError("profile dir gone")
+        for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                Path(profile_dir, lock).unlink()
+            except Exception:
+                pass
+
+        proxy = json.loads(row["proxy"]) if row["proxy"] else None
+        local_proxy = proxy_url = None
+        if proxy:
+            hold = (proxy.get("hold") or self.s.hold_proxy or "").strip()
+            if hold.lower() == "direct":
+                up = "direct"
+            elif hold:
+                up = pproxy_upstream({"server": hold})
+            else:
+                up = pproxy_upstream(proxy)
+            local_proxy = LocalProxy(up)
+            proxy_url = await local_proxy.start()
+
+        geo = None
+        if proxy_url:
+            geo = await asyncio.to_thread(self._probe_geo_http, proxy_url)
+
+        driver = await asyncio.to_thread(
+            self._setup_undetected_driver, profile_dir, proxy_url, geo)
+        origin = origin_of(row["start_url"])
+
+        def _boot():
+            self._apply_stealth(driver, geo)
+            try:
+                driver.get(origin + "/")
+            except Exception:
+                pass
+            time.sleep(3)
+
+        await asyncio.to_thread(_boot)
+
+        sess = {
+            "id": sid, "driver": driver, "local_proxy": local_proxy,
+            "user_id": row["user_id"], "chat_id": row["chat_id"],
+            "proxy": proxy, "geo": geo, "site_url": row["site_url"],
+            "pwa_name": row["pwa_name"], "start_url": row["start_url"],
+            "scope": row["scope"], "deep_link": row["deep_link"],
+            "nav_chain": [], "profile_dir": profile_dir,
+            "scanned_at": row["created_at"] or time.time(),
+            "collecting": True, "stage": row["stage"] or STAGE_INSTALL,
+            "push_queue": [], "observer": None,
+            "push_subscribed": bool(row["push_subscribed"]),
+            "push_endpoint": row["push_endpoint"],
+            "push_by": "funnel" if row["push_subscribed"] else None,
+            "expires_at": row["expires_at"], "on_hold": True,
+        }
+        self._sessions[sid] = sess
+        await asyncio.to_thread(self._start_observer, sid, sess)
+        log.info("restored %s (%s, stage=%s, sub=%s)", sid[:8],
+                 row["pwa_name"], sess["stage"], sess["push_subscribed"])
