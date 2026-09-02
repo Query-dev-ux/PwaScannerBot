@@ -1453,7 +1453,7 @@ class SessionManager:
     """
 
     _VAPP_SUB_JS = r"""
-    const startUrl = arguments[0];
+    const cands = arguments[0];
     const cb = arguments[arguments.length - 1];
     const b64u = (k) => {
       const pad = '='.repeat((4 - k.length % 4) % 4);
@@ -1463,20 +1463,32 @@ class SessionManager:
       for (let i = 0; i < raw.length; i++) a[i] = raw.charCodeAt(i);
       return a;
     };
+    const readMeta = (html, n) => {
+      const m = html.match(new RegExp(
+        '<meta[^>]+name=["\']' + n + '["\'][^>]+content=["\']([^"\']+)'));
+      return m ? m[1] : null;
+    };
     (async () => {
       try {
-        // the pwa_<uuid> HTML carries the push config in <meta> tags
-        const html = await fetch(startUrl, {credentials: 'include'})
-          .then(r => r.text());
-        const meta = (n) => {
-          const m = html.match(
-            new RegExp('<meta[^>]+name=["\']' + n + '["\'][^>]+content=["\']([^"\']+)'));
-          return m ? m[1] : (document.querySelector('meta[name="' + n + '"]') || {}).content;
-        };
-        const key = meta('va_app_public_key');
-        const uid = meta('user_id');
-        const vaid = meta('va_app_id');
-        if (!key) return cb({err: 'no va_app_public_key in ' + startUrl});
+        // the push config lives in <meta> tags — on the pwa_<uuid> page for
+        // some funnel versions, on a fresh manifest's start_url for others.
+        let key = null, uid = null, vaid = null, hit = null;
+        for (const u of cands) {
+          if (!u) continue;
+          let html = '';
+          try { html = await fetch(u, {credentials: 'include'}).then(r => r.text()); }
+          catch (e) { continue; }
+          const k = readMeta(html, 'va_app_public_key');
+          if (k) {
+            key = k; uid = readMeta(html, 'user_id');
+            vaid = readMeta(html, 'va_app_id'); hit = u; break;
+          }
+        }
+        if (!key) {
+          key = (document.querySelector('meta[name="va_app_public_key"]') || {}).content;
+          uid = (document.querySelector('meta[name="user_id"]') || {}).content;
+        }
+        if (!key) return cb({err: 'no va_app_public_key (tried ' + cands.length + ')'});
 
         const lang = navigator.language || 'es';
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -1520,7 +1532,8 @@ class SessionManager:
           },
           body,
         });
-        cb({endpoint: sub.endpoint, posted: res.status, uid: uid, vaid: vaid});
+        cb({endpoint: sub.endpoint, posted: res.status, uid: uid,
+            vaid: vaid, src: hit});
       } catch (e) { cb({err: String(e)}); }
     })();
     """
@@ -1542,14 +1555,26 @@ class SessionManager:
                     {"origin": origin, "permissions": ["notifications"]})
             except Exception:
                 pass
-            driver.set_script_timeout(45)
-            r = driver.execute_async_script(self._VAPP_SUB_JS, start_url) or {}
+            # candidate URLs that may carry the <meta va_app_public_key>:
+            # the manifest start_url, a freshly-minted one, /pwa, and root.
+            cands = [start_url]
+            try:
+                m, murl = self._read_manifest(driver, budget_ms=5000)
+                if m and m.get("start_url"):
+                    cands.insert(0, m["start_url"])
+            except Exception:
+                pass
+            cands += [origin + "/pwa", origin + "/"]
+            seen, cands = set(), [c for c in cands
+                                  if not (c in seen or seen.add(c))]
+            driver.set_script_timeout(60)
+            r = driver.execute_async_script(self._VAPP_SUB_JS, cands) or {}
             driver.set_script_timeout(20)
             if r.get("endpoint"):
                 out["endpoint"] = r["endpoint"]
-                log.info("vapp subscribe: OK ep=%s posted=%s uid=%s",
+                log.info("vapp subscribe: OK ep=%s posted=%s uid=%s src=%s",
                          r["endpoint"].split("/")[2], r.get("posted"),
-                         r.get("uid"))
+                         r.get("uid"), r.get("src"))
             else:
                 log.info("vapp subscribe: %s", r.get("err"))
         except Exception as e:  # noqa: BLE001
@@ -2680,6 +2705,30 @@ class SessionManager:
         now = time.time()
         for sid, sess in list(self._sessions.items()):
             if not sess.get("collecting"):
+                continue
+
+            # is the browser still alive? on a small box Chrome/chromedriver
+            # gets OOM-killed and the session goes silent.
+            if not sess.get("_dead"):
+                try:
+                    await asyncio.to_thread(
+                        lambda d=sess["driver"]: d.execute_script("return 1"))
+                except Exception:
+                    sess["_dead"] = True
+                    log.error("session %s browser is DEAD (driver unreachable)",
+                              sid[:8])
+                    try:
+                        await self.bot.send_message(
+                            sess["chat_id"],
+                            f"⚠️ Браузер сессии <b>{esc(sess['pwa_name'])}</b> упал "
+                            "(вероятно нехватка RAM на сервере). Сбор остановлен — "
+                            "пересканируй. Собранное сохранено, забери "
+                            "<b>📦 Скачать архив</b>.",
+                        )
+                    except Exception:
+                        pass
+                    continue
+            if sess.get("_dead"):
                 continue
 
             # health check for already-subscribed sessions (any stage),
