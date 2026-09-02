@@ -96,7 +96,16 @@ class SessionManager:
 
     async def start(self) -> None:
         """Initialize session manager (no-op for undetected-chromedriver)."""
-        pass
+        log.info(
+            "env: DISPLAY=%r DBUS_SESSION_BUS_ADDRESS=%r HEADLESS=%s",
+            os.environ.get("DISPLAY"),
+            os.environ.get("DBUS_SESSION_BUS_ADDRESS"),
+            self.s.headless,
+        )
+        # if the entrypoint's D-Bus / display didn't propagate, at least make
+        # sure a display is set so headful Chrome + dunst agree
+        if not self.s.headless and not os.environ.get("DISPLAY"):
+            os.environ["DISPLAY"] = ":99"
 
     async def stop(self) -> None:
         """Close all active sessions."""
