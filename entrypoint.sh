@@ -14,13 +14,20 @@ if [ "${HEADLESS}" = "false" ]; then
   done
 fi
 
-# A session D-Bus + a notification daemon so Chrome's showNotification()
-# actually gets acknowledged. Without this, web-push subscriptions with
-# userVisibleOnly:true get REVOKED by Chrome after a push it can't display
-# ("Unsubscribed due to error"). dunst needs a display; harmless if headless.
+# Session D-Bus on a FIXED socket + a notification daemon, so Chrome's
+# showNotification() gets acknowledged. Without a visible notification Chrome
+# REVOKES userVisibleOnly push subscriptions after the first push
+# ("Unsubscribed due to error"). The fixed path lets the Python side hand the
+# exact address to Chrome (chromedriver doesn't reliably propagate env).
 if command -v dbus-daemon >/dev/null 2>&1; then
-  eval "$(dbus-launch --sh-syntax)" || true
-  export DBUS_SESSION_BUS_ADDRESS
+  rm -f /tmp/dbus-session
+  dbus-daemon --session --nofork --nopidfile \
+      --address=unix:path=/tmp/dbus-session >/tmp/dbus.log 2>&1 &
+  export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session
+  for i in $(seq 1 25); do
+    [ -S /tmp/dbus-session ] && break
+    sleep 0.2
+  done
   if [ -n "${DISPLAY}" ] && command -v dunst >/dev/null 2>&1; then
     dunst >/tmp/dunst.log 2>&1 &
   fi

@@ -148,8 +148,22 @@ class SessionManager:
         """
         import undetected_chromedriver as uc
 
+        # chromedriver does NOT reliably propagate the launcher's env to the
+        # Chrome process (verified: main browser had no DISPLAY / DBUS). Set
+        # them here so Chrome can reach Xvfb + the notification daemon —
+        # without a displayable notification Chrome revokes userVisibleOnly
+        # push subscriptions after the first push.
+        if not self.s.headless:
+            os.environ.setdefault("DISPLAY", ":99")
+            if os.path.exists("/tmp/dbus-session"):
+                os.environ["DBUS_SESSION_BUS_ADDRESS"] = (
+                    "unix:path=/tmp/dbus-session")
+
         chrome_options = uc.ChromeOptions()
         chrome_options.user_data_dir = profile_dir
+        if not self.s.headless:
+            chrome_options.add_argument(
+                f"--display={os.environ.get('DISPLAY', ':99')}")
         if app_url:
             chrome_options.add_argument(f"--app={app_url}")
 
@@ -211,8 +225,26 @@ class SessionManager:
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(20)
         log.info(
-            "launched uc (headless=%s, lang=%s)", self.s.headless, accept_lang
+            "launched uc (headless=%s, lang=%s, DISPLAY=%s dbus=%s)",
+            self.s.headless, accept_lang, os.environ.get("DISPLAY"),
+            bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS")),
         )
+        # confirm the Chrome process actually got the notification env
+        try:
+            import glob as _glob
+            for cl in _glob.glob("/proc/*/cmdline"):
+                data = open(cl, "rb").read()
+                if b"--user-data-dir" not in data or b"--type=" in data:
+                    continue
+                pid = cl.split("/")[2]
+                env = open(f"/proc/{pid}/environ", "rb").read().decode(
+                    "utf-8", "replace")
+                log.info("chrome pid=%s DISPLAY=%s DBUS=%s", pid,
+                         "DISPLAY=" in env,
+                         "DBUS_SESSION_BUS_ADDRESS=" in env)
+                break
+        except Exception as e:  # noqa: BLE001
+            log.debug("chrome env check skipped: %s", e)
         return driver
 
     def _lang_for_geo(self, geo: dict | None) -> tuple[str, str]:
