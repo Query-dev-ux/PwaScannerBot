@@ -1580,8 +1580,8 @@ class SessionManager:
             except Exception:
                 pass
             cands += [origin + "/pwa", origin + "/"]
-            seen, cands = set(), [c for c in cands
-                                  if not (c in seen or seen.add(c))]
+            seen: set = set()
+            cands = [c for c in cands if not (c in seen or seen.add(c))]
             driver.set_script_timeout(60)
             r = driver.execute_async_script(self._VAPP_SUB_JS, cands) or {}
             driver.set_script_timeout(20)
