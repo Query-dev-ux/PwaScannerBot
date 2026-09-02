@@ -26,30 +26,6 @@ from app.utils import esc, origin_of, pack_caption
 log = logging.getLogger(__name__)
 
 
-def _patch_uc_env() -> None:
-    """undetected-chromedriver launches Chrome detached and does not pass the
-    current environment, so Chrome ends up without DISPLAY / DBUS_SESSION_BUS_
-    ADDRESS — and then revokes push subscriptions it can't show a notification
-    for. Force the env onto every Popen it makes."""
-    try:
-        import subprocess as _sp
-        import undetected_chromedriver.dprocess as _dp
-
-        _orig = _dp.subprocess.Popen
-
-        def _popen(*a, **kw):
-            kw.setdefault("env", dict(os.environ))
-            return _orig(*a, **kw)
-
-        _dp.subprocess.Popen = _popen
-        log.info("patched uc.dprocess Popen to pass env")
-    except Exception as e:  # noqa: BLE001
-        log.warning("uc env patch failed: %s", e)
-
-
-_patch_uc_env()
-
-
 class SessionLimit(Exception):
     pass
 
@@ -237,7 +213,16 @@ class SessionManager:
         chrome_options.add_argument(f"--lang={locale}")
         chrome_options.add_argument(f"--accept-lang={tags}")
         chrome_options.add_experimental_option(
-            "prefs", {"intl.accept_languages": tags}
+            "prefs", {
+                "intl.accept_languages": tags,
+                # grant web-notification permission to every origin. The push
+                # DELIVERY check reads the real content setting (not the
+                # Browser.grantPermissions override, and not the spoofed
+                # Notification.permission) — without this Chrome revokes the
+                # subscription on the first push: Reason DELIVERY_PERMISSION_DENIED.
+                "profile.default_content_setting_values.notifications": 1,
+                "profile.managed_default_content_settings.notifications": 1,
+            }
         )
 
         # Mobile viewport. The real Android UA + consistent Sec-CH-UA client
