@@ -213,6 +213,9 @@ class CdpBridge:
             # session so a reconnect doesn't re-log hours-old events as new.
             key = "%s|%s|%s" % (ev.get("service"), ev.get("eventName"),
                                 ev.get("instanceId") or ev.get("timestamp"))
+            log.info("cdp bg-event: svc=%s name=%s inst=%s dup=%s",
+                     ev.get("service"), ev.get("eventName"),
+                     ev.get("instanceId"), key in self._seen)
             if key in self._seen:
                 return
             self._seen[key] = time.time()

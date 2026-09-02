@@ -2658,17 +2658,23 @@ class SessionManager:
         await self.flush_pushes()
 
     async def flush_pushes(self) -> None:
-        """Drain queued push events from every session into the DB."""
+        """Drain queued push events from every session into the DB. On a write
+        failure (sqlite lock under load) the record is put back for the next
+        flush instead of being dropped."""
         for sid, sess in list(self._sessions.items()):
             q = sess.get("push_queue")
             if not q:
                 continue
             batch, sess["push_queue"] = q, []
+            failed = []
             for rec in batch:
                 try:
                     await self.db.add_push(sid, rec)
                 except Exception as e:  # noqa: BLE001
-                    log.warning("add_push failed: %s", e)
+                    log.warning("add_push failed (re-queued): %s", e)
+                    failed.append(rec)
+            if failed:
+                sess["push_queue"] = failed + sess.get("push_queue", [])
 
     _SUB_ALIVE_JS = r"""
     const cb = arguments[arguments.length - 1];
