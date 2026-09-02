@@ -26,6 +26,30 @@ from app.utils import esc, origin_of, pack_caption
 log = logging.getLogger(__name__)
 
 
+def _patch_uc_env() -> None:
+    """undetected-chromedriver launches Chrome detached and does not pass the
+    current environment, so Chrome ends up without DISPLAY / DBUS_SESSION_BUS_
+    ADDRESS — and then revokes push subscriptions it can't show a notification
+    for. Force the env onto every Popen it makes."""
+    try:
+        import subprocess as _sp
+        import undetected_chromedriver.dprocess as _dp
+
+        _orig = _dp.subprocess.Popen
+
+        def _popen(*a, **kw):
+            kw.setdefault("env", dict(os.environ))
+            return _orig(*a, **kw)
+
+        _dp.subprocess.Popen = _popen
+        log.info("patched uc.dprocess Popen to pass env")
+    except Exception as e:  # noqa: BLE001
+        log.warning("uc env patch failed: %s", e)
+
+
+_patch_uc_env()
+
+
 class SessionLimit(Exception):
     pass
 
