@@ -2731,8 +2731,10 @@ class SessionManager:
     def _subscription_alive(self, driver, origin: str) -> dict:
         try:
             if origin_of(driver.current_url or "") != origin:
-                driver.get(origin + "/")
-                time.sleep(2)
+                # a static path, NOT "/" — "/" runs the funnel SPA which can
+                # redirect us away or tamper with the subscription
+                driver.get(origin + "/robots.txt")
+                time.sleep(1.5)
             driver.set_script_timeout(20)
             r = driver.execute_async_script(self._SUB_ALIVE_JS) or {}
             driver.set_script_timeout(20)
