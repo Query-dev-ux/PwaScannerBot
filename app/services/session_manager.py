@@ -424,11 +424,18 @@ class SessionManager:
                   const startUrl = arguments[0];
                   const org = location.origin;
                   const urls = new Set(['/push/vapp/VappWorker.js',
-                    '/PwaWorker.js', '/revisionMap.json']);
+                    '/PwaWorker.js', '/revisionMap.json', '/service-worker.js',
+                    '/service-worker-fcm.js', '/service-worker-os.js',
+                    '/landing-static/init-work.min.js']);
                   for (const s of document.scripts)
                     if (s.src && s.src.indexOf(org) === 0) urls.add(s.src);
                   (async () => {
                     const out = {};
+                    try {
+                      const reg = await navigator.serviceWorker.getRegistration();
+                      const u = reg && (reg.active||reg.installing||reg.waiting);
+                      if (u && u.scriptURL) urls.add(u.scriptURL);
+                    } catch (e) {}
                     // grab the raw HTML of the funnel root + the pwa_ start_url
                     for (const [k, u] of [['__html_root__', org + '/'],
                                           ['__html_start__', startUrl]]) {
