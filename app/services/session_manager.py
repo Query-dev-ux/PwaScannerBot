@@ -2684,6 +2684,44 @@ class SessionManager:
     })();
     """
 
+    _SUB_REPORT_JS = r"""
+    const cb = arguments[arguments.length - 1];
+    (async () => {
+      const out = {url: location.href, perm: (window.Notification||{}).permission,
+                   regs: []};
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) {
+          const w = r.active || r.installing || r.waiting || {};
+          let ep = null;
+          try { const s = await r.pushManager.getSubscription();
+                ep = s && s.endpoint; } catch (e) {}
+          out.regs.push({sw: w.scriptURL || '?', scope: r.scope,
+                         endpoint: ep ? ep.split('/').slice(0,4).join('/') + '…' : null});
+        }
+      } catch (e) { out.err = String(e); }
+      cb(out);
+    })();
+    """
+
+    def subcheck(self, sess: dict) -> dict:
+        d = sess["driver"]
+        origin = origin_of(sess["start_url"])
+        try:
+            d.execute_script("return 1")
+        except Exception as e:  # noqa: BLE001
+            return {"dead": True, "err": str(e)[:120]}
+        try:
+            if origin_of(d.current_url or "") != origin and not sess.get("parked"):
+                d.get(origin + "/")
+                time.sleep(2)
+            d.set_script_timeout(20)
+            r = d.execute_async_script(self._SUB_REPORT_JS) or {}
+            d.set_script_timeout(20)
+            return r
+        except Exception as e:  # noqa: BLE001
+            return {"err": str(e)[:160]}
+
     def _subscription_alive(self, driver, origin: str) -> dict:
         try:
             if origin_of(driver.current_url or "") != origin:

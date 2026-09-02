@@ -19,7 +19,7 @@ from app.keyboards import (
     proxies_kb,
 )
 from app.proxies import load_proxies
-from app.services.session_manager import STAGE_LABEL
+from app.services.session_manager import STAGE_LABEL, SessionManager
 from app.states import Flow
 from app.utils import esc, session_card
 
@@ -155,3 +155,40 @@ async def cmd_status(message: Message, settings: Settings, db: Database):
         await message.answer(NEED_KEY)
         return
     await _show_sessions(message, db)
+
+
+@router.message(Command("subcheck"))
+async def cmd_subcheck(message: Message, settings: Settings, db: Database,
+                       manager: SessionManager):
+    import asyncio as _a
+    if not await can_collect(db, settings, message.from_user.id):
+        await message.answer(NEED_KEY)
+        return
+    sids = list(manager._sessions)
+    if not sids:
+        await message.answer("Активных сессий в памяти нет (после рестарта не восстанавливаются).")
+        return
+    for sid in sids:
+        sess = manager._sessions.get(sid)
+        if not sess:
+            continue
+        try:
+            r = await _a.to_thread(manager.subcheck, sess)
+        except Exception as e:  # noqa: BLE001
+            await message.answer(f"<code>{sid[:8]}</code>: ошибка {esc(str(e))}")
+            continue
+        if r.get("dead"):
+            await message.answer(
+                f"<code>{sid[:8]}</code> {esc(sess.get('pwa_name',''))}: "
+                f"❌ браузер мёртв — {esc(r.get('err',''))}")
+            continue
+        lines = [f"<code>{sid[:8]}</code> <b>{esc(sess.get('pwa_name',''))}</b>",
+                 f"url: {esc((r.get('url') or '')[:80])}",
+                 f"Notification.permission: {esc(str(r.get('perm')))}"]
+        for reg in r.get("regs", []):
+            lines.append(
+                f"• SW {esc((reg.get('sw') or '').split('/')[-1])} scope={esc(reg.get('scope',''))}\n"
+                f"  push: {'✅ ' + esc(reg['endpoint']) if reg.get('endpoint') else '⚠️ нет подписки'}")
+        if r.get("err"):
+            lines.append(f"err: {esc(r['err'])}")
+        await message.answer("\n".join(lines), disable_web_page_preview=True)
