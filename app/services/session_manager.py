@@ -2617,6 +2617,11 @@ class SessionManager:
                 "push [%s/%s] %s: %s",
                 session_id[:8], ev.get("stage"), ev.get("event"), ev.get("title"),
             )
+            # a real content push arrived — verify the subscription survived it
+            # (Chrome revokes userVisibleOnly subs when showNotification fails)
+            if (ev.get("service") == "pushMessaging"
+                    and (ev.get("title") or ev.get("body"))):
+                sess["_verify_sub_at"] = time.time() + 25
 
         bridge = CdpBridge(ws_url, on_event)
         bridge.start()
@@ -2675,6 +2680,33 @@ class SessionManager:
                     failed.append(rec)
             if failed:
                 sess["push_queue"] = failed + sess.get("push_queue", [])
+
+            # post-push subscription check (armed by on_event)
+            due = sess.get("_verify_sub_at")
+            if (due and time.time() >= due and not sess.get("ctl_active")
+                    and not sess.get("parked")):
+                sess.pop("_verify_sub_at", None)
+                origin = origin_of(sess["start_url"])
+                st = await asyncio.to_thread(
+                    self._subscription_alive, sess["driver"], origin)
+                alive = st.get("alive")
+                log.info("post-push sub check %s: alive=%s", sid[:8], alive)
+                msg = ("✅ Пуш получен, подписка жива."
+                       if alive else
+                       "⚠️ Пуш получен, но Chrome отозвал подписку — "
+                       "переподписываюсь.")
+                try:
+                    await self.bot.send_message(sess["chat_id"], msg)
+                except Exception:
+                    pass
+                if not alive:
+                    va = await asyncio.to_thread(
+                        self._vapp_subscribe, sess["driver"], sess["start_url"])
+                    if va.get("endpoint"):
+                        sess["push_endpoint"] = va["endpoint"]
+                        await self.db.set_session_fields(
+                            sid, push_subscribed=1,
+                            push_endpoint=va["endpoint"])
 
     _SUB_ALIVE_JS = r"""
     const cb = arguments[arguments.length - 1];
