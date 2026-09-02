@@ -76,6 +76,19 @@ class Database:
             pcols = {r[1] for r in await cur.fetchall()}
             if "stage" not in pcols:
                 await db.execute("ALTER TABLE pushes ADD COLUMN stage TEXT")
+            # one-off cleanup: earlier builds stored every push-lifecycle event
+            # as its own row (received / dispatched / displayed / completed)
+            await db.execute(
+                "DELETE FROM pushes WHERE event IN "
+                "('Push event dispatched','Push event completed')"
+            )
+            await db.execute(
+                "DELETE FROM pushes WHERE event='Notification displayed' "
+                "AND EXISTS (SELECT 1 FROM pushes p2 "
+                "WHERE p2.session_id=pushes.session_id "
+                "AND p2.event='Push message received' "
+                "AND ABS(p2.ts - pushes.ts) < 12)"
+            )
             await db.commit()
 
     @asynccontextmanager
