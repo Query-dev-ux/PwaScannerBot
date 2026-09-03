@@ -1,8 +1,7 @@
 [
   {
     "name": "PE · Peru",
-    "server": "socks5://SCAN_USER:SCAN_PASS@SCAN_HOST:PORT",
-    "hold": "socks5://HOLD_USER:HOLD_PASS@HOLD_HOST:PORT"
+    "server": "socks5://SCAN_USER:SCAN_PASS@SCAN_HOST:PORT"
   },
   {
     "name": "CO · Colombia",

@@ -38,11 +38,6 @@ class Settings(BaseSettings):
     # Unlocks the Push-collection features. Users run /unlock <key>.
     access_key: str = Field(default="", alias="ACCESS_KEY")
 
-    # Cheap proxy to hold a collecting session on after the push subscription is
-    # created (the scan proxy is only needed to get past anti-bot). Same format
-    # as a proxies.json "server". Empty = keep the scan proxy the whole time.
-    hold_proxy: str = Field(default="", alias="HOLD_PROXY")
-
     # Live browser control (screencast) web server
     webcontrol_host: str = Field(default="0.0.0.0", alias="WEBCONTROL_HOST")
     webcontrol_port: int = Field(default=8080, alias="WEBCONTROL_PORT")

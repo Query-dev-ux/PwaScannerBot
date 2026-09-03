@@ -87,6 +87,7 @@ class SessionManager:
         self.webcontrol = webcontrol
         self._sessions: dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         os.makedirs(self.s.sessions_dir, exist_ok=True)
 
     def control_url(self, session_id: str) -> str | None:
@@ -96,6 +97,7 @@ class SessionManager:
 
     async def start(self) -> None:
         """Initialize session manager (no-op for undetected-chromedriver)."""
+        self._loop = asyncio.get_running_loop()
         log.info(
             "env: DISPLAY=%r DBUS_SESSION_BUS_ADDRESS=%r HEADLESS=%s",
             os.environ.get("DISPLAY"),
@@ -792,6 +794,8 @@ class SessionManager:
                 "id": session_id,
                 "driver": driver,
                 "local_proxy": local_proxy,
+                "scan_upstream": pproxy_upstream(proxy) if proxy else None,
+                "net": "proxy" if proxy else "direct",
                 "user_id": user_id,
                 "chat_id": chat_id,
                 "proxy": proxy,
@@ -2632,10 +2636,11 @@ class SessionManager:
 
         await asyncio.to_thread(self._start_observer, session_id, sess)
 
-        # NB: keep the scan proxy until the deposit stage — the user still has
-        # to register + deposit through the live browser, and the hold/direct
-        # proxy is often geo-blocked by the casino. _swap_to_hold runs from
-        # set_stage(deposit).
+        # idle proxyless — pushes ride the browser's FCM connection. The scan
+        # proxy comes back on demand while the live browser is open (register /
+        # deposit need the geo), via _on_ctl_view.
+        if sess.get("push_subscribed"):
+            await self._use_direct(sess)
 
         return PushInfo(
             expires_at, STAGE_INSTALL, sess["pwa_name"],
@@ -2643,27 +2648,51 @@ class SessionManager:
             sess.get("push_subscribed", False), sess.get("push_endpoint"),
         )
 
-    def _hold_upstream(self, sess: dict) -> str | None:
-        proxy = sess.get("proxy") or {}
-        hold = proxy.get("hold") or self.s.hold_proxy
-        if not hold:
-            return None
-        if hold.strip().lower() == "direct":
-            return "direct"  # proxyless — pushes arrive over the FCM connection
-        return pproxy_upstream({"server": hold})
-
-    async def _swap_to_hold(self, sess: dict) -> None:
-        if sess.get("on_hold") or not sess.get("local_proxy"):
-            return
-        up = self._hold_upstream(sess)
-        if not up:
+    async def _use_direct(self, sess: dict) -> None:
+        """Drop the paid proxy — the session idles proxyless (pushes arrive
+        over the browser's FCM connection, which is geo-agnostic)."""
+        lp = sess.get("local_proxy")
+        if not lp or sess.get("net") == "direct":
             return
         try:
-            await sess["local_proxy"].swap(up)
-            sess["on_hold"] = True
-            log.info("session %s moved to hold proxy", sess["id"][:8])
+            await lp.swap("direct")
+            sess["net"] = "direct"
+            log.info("session %s -> direct (proxy released)", sess["id"][:8])
         except Exception as e:  # noqa: BLE001
-            log.warning("swap to hold proxy failed: %s", e)
+            log.warning("swap to direct failed: %s", e)
+
+    async def _use_proxy(self, sess: dict) -> None:
+        """Bring the scan proxy back up — needed to load the geo-gated
+        casino/funnel in the live browser (register / deposit)."""
+        lp = sess.get("local_proxy")
+        up = sess.get("scan_upstream")
+        if not lp or not up or sess.get("net") == "proxy":
+            return
+        try:
+            await lp.swap(up)
+            sess["net"] = "proxy"
+            log.info("session %s -> proxy (live browser opened)", sess["id"][:8])
+        except Exception as e:  # noqa: BLE001
+            log.warning("swap to proxy failed: %s", e)
+
+    def _on_ctl_view(self, sess: dict, active: bool) -> None:
+        """Sync callback from the web-control WS: bring the proxy up while the
+        live browser is open, drop it (after a grace period) when it closes."""
+        sess["ctl_active"] = active
+        loop = self._loop
+        if not loop:
+            return
+        prev = sess.pop("_ctl_grace", None)
+        if prev:
+            prev.cancel()
+        if active:
+            asyncio.run_coroutine_threadsafe(self._use_proxy(sess), loop)
+        else:
+            async def _later():
+                await asyncio.sleep(25)
+                if not sess.get("ctl_active"):
+                    await self._use_direct(sess)
+            sess["_ctl_grace"] = asyncio.run_coroutine_threadsafe(_later(), loop)
 
     def _start_observer(self, session_id: str, sess: dict) -> None:
         from app.services.cdp_bridge import CdpBridge
@@ -2694,7 +2723,7 @@ class SessionManager:
             try:
                 self.webcontrol.register(
                     session_id, sess["pwa_name"], bridge,
-                    on_view=lambda a, s=sess: s.__setitem__("ctl_active", a),
+                    on_view=lambda a, s=sess: self._on_ctl_view(s, a),
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("webcontrol register failed: %s", e)
@@ -2708,10 +2737,8 @@ class SessionManager:
         sess["stage"] = stage
         await self.db.set_session_fields(session_id, stage=stage)
         # after deposit there's no more manual interaction — free the page RAM
-        # and move to the cheap hold proxy (the good proxy was needed for the
-        # register/deposit steps in the live browser)
         if stage == STAGE_DEPOSIT:
-            await self._swap_to_hold(sess)
+            await self._use_direct(sess)
             await asyncio.to_thread(self._park_session, sess)
         # drop a marker into the push stream so the pack shows the transition
         sess["push_queue"].append(
@@ -2767,6 +2794,7 @@ class SessionManager:
                 except Exception:
                     pass
                 if not alive:
+                    await self._use_proxy(sess)  # re-subscribe needs the geo
                     va = await asyncio.to_thread(
                         self._vapp_subscribe, sess["driver"], sess["start_url"])
                     if va.get("endpoint"):
@@ -2774,6 +2802,8 @@ class SessionManager:
                         await self.db.set_session_fields(
                             sid, push_subscribed=1,
                             push_endpoint=va["endpoint"])
+                    if not sess.get("ctl_active"):
+                        await self._use_direct(sess)
 
     _SUB_ALIVE_JS = r"""
     const cb = arguments[arguments.length - 1];
@@ -2888,6 +2918,7 @@ class SessionManager:
                 if not st.get("alive"):
                     log.warning("session %s subscription gone — re-subscribing",
                                 sid[:8])
+                    await self._use_proxy(sess)
                     va = await asyncio.to_thread(
                         self._vapp_subscribe, sess["driver"], sess["start_url"])
                     if va.get("endpoint"):
@@ -2895,6 +2926,8 @@ class SessionManager:
                         await self.db.set_session_fields(
                             sid, push_subscribed=1, push_endpoint=va["endpoint"])
                         log.info("session %s re-subscribed", sid[:8])
+                    if not sess.get("ctl_active"):
+                        await self._use_direct(sess)
 
             if sess.get("stage") != STAGE_INSTALL:
                 continue
@@ -3076,6 +3109,12 @@ class SessionManager:
     async def _teardown_session(self, session_data: dict | None) -> None:
         if not session_data:
             return
+        grace = session_data.pop("_ctl_grace", None)
+        if grace:
+            try:
+                grace.cancel()
+            except Exception:
+                pass
         if self.webcontrol and session_data.get("id"):
             try:
                 self.webcontrol.unregister(session_data["id"])
@@ -3160,21 +3199,14 @@ class SessionManager:
                 pass
 
         proxy = json.loads(row["proxy"]) if row["proxy"] else None
-        local_proxy = proxy_url = None
-        on_hold = row["stage"] == STAGE_DEPOSIT  # only then is hold safe
+        scan_upstream = pproxy_upstream(proxy) if proxy else None
+        local_proxy = proxy_url = geo = None
+        # start on the real proxy to probe geo (fingerprint must match it when
+        # the live browser is used later), then idle proxyless once subscribed.
+        idle_direct = bool(row["push_subscribed"])
         if proxy:
-            hold = (proxy.get("hold") or self.s.hold_proxy or "").strip()
-            if on_hold and hold.lower() == "direct":
-                up = "direct"
-            elif on_hold and hold:
-                up = pproxy_upstream({"server": hold})
-            else:
-                up = pproxy_upstream(proxy)  # scan proxy for register/deposit
-            local_proxy = LocalProxy(up)
+            local_proxy = LocalProxy(scan_upstream)
             proxy_url = await local_proxy.start()
-
-        geo = None
-        if proxy_url:
             geo = await asyncio.to_thread(self._probe_geo_http, proxy_url)
 
         driver = await asyncio.to_thread(
@@ -3193,6 +3225,7 @@ class SessionManager:
 
         sess = {
             "id": sid, "driver": driver, "local_proxy": local_proxy,
+            "scan_upstream": scan_upstream, "net": "proxy" if proxy else "direct",
             "user_id": row["user_id"], "chat_id": row["chat_id"],
             "proxy": proxy, "geo": geo, "site_url": row["site_url"],
             "pwa_name": row["pwa_name"], "start_url": row["start_url"],
@@ -3204,9 +3237,11 @@ class SessionManager:
             "push_subscribed": bool(row["push_subscribed"]),
             "push_endpoint": row["push_endpoint"],
             "push_by": "funnel" if row["push_subscribed"] else None,
-            "expires_at": row["expires_at"], "on_hold": on_hold,
+            "expires_at": row["expires_at"],
         }
         self._sessions[sid] = sess
         await asyncio.to_thread(self._start_observer, sid, sess)
+        if idle_direct:
+            await self._use_direct(sess)
         log.info("restored %s (%s, stage=%s, sub=%s)", sid[:8],
                  row["pwa_name"], sess["stage"], sess["push_subscribed"])
