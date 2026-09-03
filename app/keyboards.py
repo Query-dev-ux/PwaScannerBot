@@ -2,17 +2,27 @@ from __future__ import annotations
 
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-BTN_LINK = "🔗 Scan offer link"
-BTN_COLLECT = "🔔 Запустить сбор Push"
+BTN_LINK = "🔎 Сканер PWA"
+BTN_PUSH_MENU = "🔔 Сбор Push"
+BTN_COLLECT = "▶️ Запустить сбор Push"
 BTN_SESSIONS = "📊 Сессии сбора Push"
+BTN_BACK = "⬅️ Главное меню"
 
 
 def main_menu_kb(authorized: bool = False):
     b = ReplyKeyboardBuilder()
     b.button(text=BTN_LINK)
     if authorized:
-        b.button(text=BTN_COLLECT)
-        b.button(text=BTN_SESSIONS)
+        b.button(text=BTN_PUSH_MENU)
+    b.adjust(1)
+    return b.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+def push_menu_kb():
+    b = ReplyKeyboardBuilder()
+    b.button(text=BTN_COLLECT)
+    b.button(text=BTN_SESSIONS)
+    b.button(text=BTN_BACK)
     b.adjust(1)
     return b.as_markup(resize_keyboard=True, is_persistent=True)
 

@@ -11,12 +11,15 @@ from app.access import NEED_KEY, can_collect
 from app.config import Settings
 from app.db import Database
 from app.keyboards import (
+    BTN_BACK,
     BTN_COLLECT,
     BTN_LINK,
+    BTN_PUSH_MENU,
     BTN_SESSIONS,
     collecting_actions_kb,
     main_menu_kb,
     proxies_kb,
+    push_menu_kb,
 )
 from app.proxies import load_proxies
 from app.services.session_manager import STAGE_LABEL, SessionManager
@@ -26,13 +29,12 @@ from app.utils import esc, session_card
 router = Router()
 
 WELCOME_PUBLIC = (
-    "<b>{link}</b> — быстро достать ссылку внутри PWA (оффер-линк)\n\n"
+    "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA\n\n"
     "Сбор push-уведомлений — по доступу: <code>/unlock КЛЮЧ</code>"
 )
 WELCOME_FULL = (
-    "<b>{link}</b> — быстро достать ссылку внутри PWA\n"
-    "<b>{collect}</b> — пробить клоаку и запустить сбор push\n"
-    "<b>{sessions}</b> — активные сессии сбора push"
+    "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA\n"
+    "<b>{push}</b> — запуск сбора push и активные сессии"
 )
 
 
@@ -81,7 +83,7 @@ async def cmd_start(message: Message, state: FSMContext, settings: Settings, db:
     await state.clear()
     ok = await can_collect(db, settings, message.from_user.id)
     text = (WELCOME_FULL if ok else WELCOME_PUBLIC).format(
-        link=BTN_LINK, collect=BTN_COLLECT, sessions=BTN_SESSIONS
+        link=BTN_LINK, push=BTN_PUSH_MENU
     )
     await message.answer(text, reply_markup=main_menu_kb(ok))
 
@@ -111,6 +113,27 @@ async def cmd_lock(message: Message, db: Database):
 async def btn_link(message: Message, state: FSMContext, settings: Settings):
     await state.clear()
     await _begin_scan(message, state, settings, mode="link")
+
+
+@router.message(F.text == BTN_PUSH_MENU)
+async def btn_push_menu(message: Message, state: FSMContext, settings: Settings, db: Database):
+    await state.clear()
+    if not await can_collect(db, settings, message.from_user.id):
+        await message.answer(NEED_KEY)
+        return
+    await message.answer(
+        f"<b>{BTN_PUSH_MENU}</b>\n\n"
+        f"<b>{BTN_COLLECT}</b> — пробить клоаку и начать сбор push\n"
+        f"<b>{BTN_SESSIONS}</b> — активные сессии сбора",
+        reply_markup=push_menu_kb(),
+    )
+
+
+@router.message(F.text == BTN_BACK)
+async def btn_back(message: Message, state: FSMContext, settings: Settings, db: Database):
+    await state.clear()
+    ok = await can_collect(db, settings, message.from_user.id)
+    await message.answer("Главное меню", reply_markup=main_menu_kb(ok))
 
 
 @router.message(F.text == BTN_COLLECT)
