@@ -226,7 +226,8 @@ async def view_pushes(cb: CallbackQuery, db: Database):
         g = groups.get(stage)
         if not g:
             continue
-        out.append(f"\n<b>— {esc(STAGE_LABEL.get(stage, 'без стадии'))} ({len(g)})</b>")
+        label = str(STAGE_LABEL.get(stage, "без стадии")).capitalize()
+        out.append(f"\n<b>{esc(label)} ({len(g)})</b>\n")
         for p in g[-15:]:
             ts = datetime.fromtimestamp(p["ts"]).strftime("%d.%m %H:%M")
             t = esc(p["title"] or p["event"] or "—")
@@ -237,7 +238,7 @@ async def view_pushes(cb: CallbackQuery, db: Database):
                 line += f"\n  {b}"
             if img:
                 line += f'\n  <a href="{esc(img)}">🖼 картинка</a>'
-            out.append(line)
+            out.append(line + "\n")
     await cb.message.answer("\n".join(out)[:4000], disable_web_page_preview=True)
 
 
