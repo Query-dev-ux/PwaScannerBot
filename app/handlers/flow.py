@@ -89,34 +89,34 @@ async def got_url(message: Message, state: FSMContext, manager: SessionManager):
     try:
         res = await manager.open_site(message.from_user.id, message.chat.id, proxy, url)
     except SessionLimit:
-        await status.edit_text("Слишком много активных сессий. Попробуй позже.")
+        await status.edit_text("Слишком много активных сессий, попробуй позже")
         return
     except Exception as e:  # noqa: BLE001
         await status.edit_text(f"Ошибка: <code>{esc(str(e))}</code>")
         return
 
-    tail = "\n\nСессия <b>не сохранена</b>. Включи сбор push, чтобы начать."
+    tail = "\n\nСессия <b>не сохранена</b> — включи сбор push, чтобы начать"
     if res.shell:
         tail = (
-            "\n\n⚠️ Воронка вернула <b>пустую страницу</b> (нет manifest, пустой body). "
-            "Обычно это декой клоаки."
+            "\n\n⚠️ Воронка вернула <b>пустую страницу</b> (нет manifest, пустой "
+            "body) — обычно это декой клоаки"
         )
         if res.exit_hosting and not res.exit_mobile:
             tail += (
                 f"\n\n🛑 Выходной IP <code>{esc(res.exit_ip or '?')}</code> "
-                f"(<i>{esc(res.exit_isp or '?')}</i>) — это <b>дата-центр/хостинг</b>. "
-                "Клоаки мобильных офферов режут такие IP сразу. "
-                "Нужна <b>мобильная</b> или резидентная прокси гео-страны оффера."
+                f"(<i>{esc(res.exit_isp or '?')}</i>) — это <b>дата-центр/хостинг</b>, "
+                "клоаки мобильных офферов режут такие IP сразу. "
+                "Нужна <b>мобильная</b> или резидентная прокси гео-страны оффера"
             )
         else:
             tail += (
                 f"\n\nВыходной IP: <code>{esc(res.exit_ip or '?')}</code> "
-                f"(<i>{esc(res.exit_isp or '?')}</i>). "
+                f"(<i>{esc(res.exit_isp or '?')}</i>)"
             )
         tail += (
             "\n\nЕщё проверь: ссылка с <b>валидными</b> трек-параметрами "
             "(не пустая и не с плейсхолдерами <code>{{campaign.name}}</code>, "
-            "<code>{pixel}</code>), гео прокси совпадает с гео оффера."
+            "<code>{pixel}</code>), гео прокси совпадает с гео оффера"
         )
     await status.edit_text(
         session_card(res.name, res.start_url, res.deep_link,
@@ -136,21 +136,20 @@ async def push_on(cb: CallbackQuery, manager: SessionManager):
     except Exception as e:  # noqa: BLE001
         await cb.message.answer(f"Не удалось включить сбор: <code>{esc(str(e))}</code>")
         return
-    until = datetime.fromtimestamp(info.expires_at).strftime("%d.%m %H:%M")
     tail = (
         "\n\nОткрой браузер сессии (🖥), зарегистрируйся и внеси депозит, "
-        "затем отмечай стадию."
+        "затем отмечай стадию"
     )
     if not info.push_subscribed:
         tail += (
             "\n\n⚠️ Push-подписка не создана — воронка не подписала браузер "
-            "автоматически. Пуши могут не приходить. Открой браузер сессии и "
-            "пройди воронку/установку до конца."
+            "автоматически, пуши могут не приходить. Открой браузер сессии и "
+            "пройди воронку/установку до конца"
         )
     await cb.message.answer(
         session_card(
             info.name, info.download_url, info.deep_link,
-            STAGE_LABEL.get(info.stage, info.stage), 0, until, info.push_subscribed,
+            STAGE_LABEL.get(info.stage, info.stage), 0, None, info.push_subscribed,
         )
         + tail,
         reply_markup=collecting_actions_kb(session_id, info.stage),
@@ -170,16 +169,12 @@ async def advance_stage(cb: CallbackQuery, manager: SessionManager, db: Database
         return
     row = await db.get_session(session_id)
     cnt = await db.count_pushes(session_id)
-    until = (
-        datetime.fromtimestamp(row["expires_at"]).strftime("%d.%m %H:%M")
-        if row and row["expires_at"] else None
-    )
     await cb.answer(f"Стадия: {STAGE_LABEL.get(stage, stage)}")
     try:
         await cb.message.edit_text(
             session_card(
                 row["pwa_name"] or row["site_url"], row["start_url"], row["deep_link"],
-                STAGE_LABEL.get(stage, stage), cnt, until,
+                STAGE_LABEL.get(stage, stage), cnt, None,
                 bool(row["push_subscribed"]),
             ),
             reply_markup=collecting_actions_kb(session_id, stage),
@@ -215,7 +210,7 @@ async def view_pushes(cb: CallbackQuery, db: Database):
     await cb.answer()
     pushes = [p for p in await db.list_pushes(session_id) if (p["service"] or "") != "stage"]
     if not pushes:
-        await cb.message.answer("Пушей пока нет.")
+        await cb.message.answer("Пушей пока нет")
         return
 
     groups: dict = {}
@@ -264,7 +259,7 @@ async def stop_and_deliver(cb: CallbackQuery, manager: SessionManager, db: Datab
     await cb.answer("Останавливаю и собираю архив…")
     try:
         await manager.deliver(session_id)
-        await cb.message.answer("⏹ Сбор остановлен, архив отправлен, браузер закрыт.")
+        await cb.message.answer("⏹ Сбор остановлен, архив отправлен, браузер закрыт")
     except Exception as e:  # noqa: BLE001
         await cb.message.answer(f"Ошибка: <code>{esc(str(e))}</code>")
 
@@ -274,7 +269,7 @@ async def cancel_session(cb: CallbackQuery, manager: SessionManager):
     session_id = cb.data.split(":", 1)[1]
     await manager.cancel(session_id)
     await cb.answer("Сессия отменена")
-    await cb.message.answer("🗑 Сессия отменена, браузер закрыт.")
+    await cb.message.answer("🗑 Сессия отменена, браузер закрыт")
 
 
 @router.message(Command("cancel_all"))
@@ -303,12 +298,12 @@ async def ctl_open(cb: CallbackQuery, manager: SessionManager):
     url = manager.control_url(session_id)
     await cb.answer()
     if not url:
-        await cb.message.answer("Веб-доступ не настроен (PUBLIC_URL).")
+        await cb.message.answer("Веб-доступ не настроен (PUBLIC_URL)")
         return
     await cb.message.answer(
         f'🖥 <a href="{esc(url)}"><b>Открыть живой браузер сессии</b></a>\n\n'
-        "Увидишь экран сессии и сможешь кликать, печатать и вводить URL. "
-        "Зарегистрируйся и внеси депозит здесь, затем отметь стадию.\n\n"
+        "Увидишь экран сессии, сможешь кликать, печатать и вводить URL. "
+        "Зарегистрируйся и внеси депозит здесь, затем отметь стадию\n\n"
         f"<code>{esc(url)}</code>",
         disable_web_page_preview=True,
     )

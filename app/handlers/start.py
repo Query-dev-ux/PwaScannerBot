@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -35,12 +33,16 @@ WELCOME_FULL = (
 )
 
 
+def _is_admin(settings: Settings, user_id: int) -> bool:
+    return not settings.admin_ids or user_id in settings.admin_ids
+
+
 async def _begin_scan(
     message: Message, state: FSMContext, settings: Settings, mode: str
 ) -> None:
     proxies = load_proxies(settings.proxies_file)
     if not proxies:
-        await message.answer("Прокси не настроены (proxies.json пуст).")
+        await message.answer("Прокси не настроены (proxies.json пуст)")
         return
     await state.set_state(Flow.choosing_proxy)
     await state.update_data(proxies=proxies, mode=mode)
@@ -56,19 +58,15 @@ async def _show_sessions(message: Message, db: Database) -> None:
     rows = await db.sessions_for_user(message.from_user.id)
     active = [r for r in rows if r["status"] == "collecting"]
     if not active:
-        await message.answer("Активных сессий сбора нет.")
+        await message.answer("Активных сессий сбора нет")
         return
     for r in active:
         cnt = await db.count_pushes(r["id"])
         stage = r["stage"] or "install"
-        until = (
-            datetime.fromtimestamp(r["expires_at"]).strftime("%d.%m %H:%M")
-            if r["expires_at"] else None
-        )
         await message.answer(
             session_card(
                 r["pwa_name"] or r["site_url"], r["start_url"], r["deep_link"],
-                STAGE_LABEL.get(stage, stage), cnt, until,
+                STAGE_LABEL.get(stage, stage), cnt, None,
                 bool(r["push_subscribed"]),
             ),
             reply_markup=collecting_actions_kb(r["id"], stage),
@@ -89,21 +87,84 @@ async def cmd_start(message: Message, state: FSMContext, settings: Settings, db:
 async def cmd_unlock(message: Message, command, settings: Settings, db: Database):
     key = (command.args or "").strip()
     if not settings.access_key:
-        await message.answer("Доступ по ключу не настроен (ACCESS_KEY).")
+        await message.answer("Доступ по ключу не настроен (ACCESS_KEY)")
         return
     if key != settings.access_key:
-        await message.answer("Неверный ключ.")
+        await message.answer("Неверный ключ")
         return
     await db.authorize(message.from_user.id)
     await message.answer(
-        "✅ Доступ к сбору push открыт.", reply_markup=main_menu_kb(True)
+        "✅ Доступ к сбору push открыт", reply_markup=main_menu_kb(True)
     )
 
 
 @router.message(Command("lock"))
 async def cmd_lock(message: Message, db: Database):
     await db.deauthorize(message.from_user.id)
-    await message.answer("Доступ к сбору push закрыт.", reply_markup=main_menu_kb(False))
+    await message.answer("Доступ к сбору push закрыт", reply_markup=main_menu_kb(False))
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message, settings: Settings, db: Database):
+    if not _is_admin(settings, message.from_user.id):
+        await message.answer("Только для админа")
+        return
+    ids = await db.list_authorized()
+    if not ids:
+        await message.answer("Нет пользователей с доступом")
+        return
+    lines = ["<b>Доступ к сбору push:</b>"]
+    lines += [f"• <code>{uid}</code>" for uid in ids]
+    lines.append("\nОтозвать: <code>/revoke ID</code>")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("grant"))
+async def cmd_grant(message: Message, command, settings: Settings, db: Database):
+    if not _is_admin(settings, message.from_user.id):
+        await message.answer("Только для админа")
+        return
+    arg = (command.args or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await message.answer("Формат: <code>/grant ID</code>")
+        return
+    await db.authorize(int(arg))
+    await message.answer(f"✅ Доступ выдан пользователю <code>{arg}</code>")
+
+
+@router.message(Command("revoke"))
+async def cmd_revoke(
+    message: Message, command, settings: Settings, db: Database,
+    manager: SessionManager,
+):
+    if not _is_admin(settings, message.from_user.id):
+        await message.answer("Только для админа")
+        return
+    arg = (command.args or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await message.answer("Формат: <code>/revoke ID</code>")
+        return
+    uid = int(arg)
+    await db.deauthorize(uid)
+    # stop that user's active collecting sessions
+    stopped = 0
+    for sid in list(manager._sessions):
+        s = manager._sessions.get(sid)
+        if s and s.get("user_id") == uid:
+            try:
+                await manager.cancel(sid)
+                stopped += 1
+            except Exception:  # noqa: BLE001
+                pass
+    tail = f", закрыто сессий: {stopped}" if stopped else ""
+    await message.answer(f"🚫 Доступ отозван у <code>{uid}</code>{tail}")
+    try:
+        await message.bot.send_message(
+            uid, "🚫 Доступ к сбору push отозван",
+            reply_markup=main_menu_kb(False),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.message(F.text == BTN_LINK)
@@ -186,7 +247,7 @@ async def cmd_subcheck(message: Message, settings: Settings, db: Database,
         return
     sids = list(manager._sessions)
     if not sids:
-        await message.answer("Активных сессий в памяти нет (после рестарта не восстанавливаются).")
+        await message.answer("Активных сессий в памяти нет (после рестарта не восстанавливаются)")
         return
     for sid in sids:
         sess = manager._sessions.get(sid)

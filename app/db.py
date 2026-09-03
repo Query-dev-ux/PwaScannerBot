@@ -190,6 +190,13 @@ class Database:
             await db.execute("DELETE FROM authorized WHERE user_id=?", (user_id,))
             await db.commit()
 
+    async def list_authorized(self) -> list[int]:
+        async with self._conn() as db:
+            cur = await db.execute(
+                "SELECT user_id FROM authorized ORDER BY granted_at"
+            )
+            return [r[0] for r in await cur.fetchall()]
+
     # ---------- pushes ----------
     async def add_push(self, session_id: str, rec: dict[str, Any]) -> bool:
         """Insert a push. Collapses the low-level `pushMessaging` event and the

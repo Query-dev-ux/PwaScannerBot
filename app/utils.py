@@ -141,8 +141,5 @@ def session_card(
     if stage_label is not None:
         lines.append(f"Стадия: <b>{esc(stage_label)}</b>")
     if pushes is not None:
-        row = f"Собрано пушей: <b>{pushes}</b>"
-        if until:
-            row += f" · до {until}"
-        lines.append(row)
+        lines.append(f"Собрано пушей: <b>{pushes}</b>")
     return "\n".join(lines)

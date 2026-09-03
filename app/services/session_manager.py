@@ -526,7 +526,7 @@ class SessionManager:
                     caption=u[:1000])
                 sent += 1
             if not sent:
-                await self.bot.send_message(chat_id, "Скриптов не найдено.")
+                await self.bot.send_message(chat_id, "Скриптов не найдено")
         except Exception as e:  # noqa: BLE001
             await self.bot.send_message(chat_id, f"dump_js: {esc(str(e))}")
         finally:
@@ -665,7 +665,7 @@ class SessionManager:
                         )
                         return
                 lines.append("\n⚠️ Ни одна загрузка не дала воронку с manifest — "
-                             "клоака отдаёт заглушку.")
+                             "клоака отдаёт заглушку")
                 try:
                     driver.save_screenshot(shot)
                 except Exception:
@@ -757,7 +757,7 @@ class SessionManager:
                 else:
                     raise RuntimeError(
                         "браузер/прокси не выходит в интернет "
-                        "(geo-проба не прошла). Проверь прокси."
+                        "(geo-проба не прошла) — проверь прокси"
                     )
 
             # Launch undetected driver (blocking -> thread)
@@ -2561,7 +2561,7 @@ class SessionManager:
         sess = self._sessions.get(session_id)
         if not sess:
             raise RuntimeError(
-                "Сессия не активна (браузер закрыт / истекла). Просканируй заново."
+                "Сессия не активна (браузер закрыт / истекла) — просканируй заново"
             )
         if sess.get("collecting"):
             return PushInfo(
@@ -2632,9 +2632,10 @@ class SessionManager:
 
         await asyncio.to_thread(self._start_observer, session_id, sess)
 
-        # a real (funnel-made) subscription -> the scan proxy is no longer needed
-        if sess.get("push_by") == "funnel":
-            await self._swap_to_hold(sess)
+        # NB: keep the scan proxy until the deposit stage — the user still has
+        # to register + deposit through the live browser, and the hold/direct
+        # proxy is often geo-blocked by the casino. _swap_to_hold runs from
+        # set_stage(deposit).
 
         return PushInfo(
             expires_at, STAGE_INSTALL, sess["pwa_name"],
@@ -2707,7 +2708,10 @@ class SessionManager:
         sess["stage"] = stage
         await self.db.set_session_fields(session_id, stage=stage)
         # after deposit there's no more manual interaction — free the page RAM
+        # and move to the cheap hold proxy (the good proxy was needed for the
+        # register/deposit steps in the live browser)
         if stage == STAGE_DEPOSIT:
+            await self._swap_to_hold(sess)
             await asyncio.to_thread(self._park_session, sess)
         # drop a marker into the push stream so the pack shows the transition
         sess["push_queue"].append(
@@ -2754,10 +2758,10 @@ class SessionManager:
                     self._subscription_alive, sess["driver"], origin)
                 alive = st.get("alive")
                 log.info("post-push sub check %s: alive=%s", sid[:8], alive)
-                msg = ("✅ Пуш получен, подписка жива."
+                msg = ("✅ Пуш получен, подписка жива"
                        if alive else
                        "⚠️ Пуш получен, но Chrome отозвал подписку — "
-                       "переподписываюсь.")
+                       "переподписываюсь")
                 try:
                     await self.bot.send_message(sess["chat_id"], msg)
                 except Exception:
@@ -2864,7 +2868,7 @@ class SessionManager:
                             f"⚠️ Браузер сессии <b>{esc(sess['pwa_name'])}</b> упал "
                             "(вероятно нехватка RAM на сервере). Сбор остановлен — "
                             "пересканируй. Собранное сохранено, забери "
-                            "<b>📦 Скачать архив</b>.",
+                            "<b>📦 Скачать архив</b>",
                         )
                     except Exception:
                         pass
@@ -2896,9 +2900,8 @@ class SessionManager:
                 continue
             aged_out = now - sess.get("scanned_at", now) > 1800
             if sess.get("push_subscribed") or aged_out:
-                # we have a subscription (or gave up) — release the scan proxy,
-                # don't keep re-launching the PWA (it churns the SW/subscription)
-                await self._swap_to_hold(sess)
+                # subscription is up — stop re-launching the PWA (it churns the
+                # SW/subscription). Proxy stays until set_stage(deposit).
                 continue
             if sess.get("ctl_active"):
                 continue
@@ -2924,12 +2927,11 @@ class SessionManager:
                 try:
                     await self.bot.send_message(
                         sess["chat_id"],
-                        f"🔔 Push-подписка создана — <b>{esc(sess['pwa_name'])}</b>. "
-                        "Пуши будут собираться.",
+                        f"🔔 Push-подписка создана — <b>{esc(sess['pwa_name'])}</b>, "
+                        "пуши будут собираться",
                     )
                 except Exception:
                     pass
-                await self._swap_to_hold(sess)
 
     # ---------- interactive browser access ----------
 
@@ -3140,7 +3142,7 @@ class SessionManager:
                         f"⚠️ Не удалось восстановить сессию "
                         f"<b>{esc(row['pwa_name'])}</b> после перезапуска. "
                         "Собранное сохранено (📦 архив), для продолжения — "
-                        "пересканируй.",
+                        "пересканируй",
                     )
                 except Exception:
                     pass
@@ -3159,14 +3161,15 @@ class SessionManager:
 
         proxy = json.loads(row["proxy"]) if row["proxy"] else None
         local_proxy = proxy_url = None
+        on_hold = row["stage"] == STAGE_DEPOSIT  # only then is hold safe
         if proxy:
             hold = (proxy.get("hold") or self.s.hold_proxy or "").strip()
-            if hold.lower() == "direct":
+            if on_hold and hold.lower() == "direct":
                 up = "direct"
-            elif hold:
+            elif on_hold and hold:
                 up = pproxy_upstream({"server": hold})
             else:
-                up = pproxy_upstream(proxy)
+                up = pproxy_upstream(proxy)  # scan proxy for register/deposit
             local_proxy = LocalProxy(up)
             proxy_url = await local_proxy.start()
 
@@ -3201,7 +3204,7 @@ class SessionManager:
             "push_subscribed": bool(row["push_subscribed"]),
             "push_endpoint": row["push_endpoint"],
             "push_by": "funnel" if row["push_subscribed"] else None,
-            "expires_at": row["expires_at"], "on_hold": True,
+            "expires_at": row["expires_at"], "on_hold": on_hold,
         }
         self._sessions[sid] = sess
         await asyncio.to_thread(self._start_observer, sid, sess)
