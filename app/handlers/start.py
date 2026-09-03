@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove
 
 from app.access import NEED_KEY, can_collect
 from app.config import Settings
@@ -26,11 +26,11 @@ from app.utils import esc, session_card
 
 router = Router()
 
-WELCOME_PUBLIC = "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA"
-WELCOME_FULL = (
+WELCOME = (
     "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA\n"
     "<b>{push}</b> — запуск сбора push и активные сессии"
 )
+LOCKED = "🔒 Доступ к боту закрыт\n\nОткрыть: <code>/unlock КЛЮЧ</code>"
 
 
 def _is_admin(settings: Settings, user_id: int) -> bool:
@@ -76,11 +76,13 @@ async def _show_sessions(message: Message, db: Database) -> None:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, settings: Settings, db: Database):
     await state.clear()
-    ok = await can_collect(db, settings, message.from_user.id)
-    text = (WELCOME_FULL if ok else WELCOME_PUBLIC).format(
-        link=BTN_LINK, push=BTN_PUSH_MENU
+    if not await can_collect(db, settings, message.from_user.id):
+        await message.answer(LOCKED, reply_markup=ReplyKeyboardRemove())
+        return
+    await message.answer(
+        WELCOME.format(link=BTN_LINK, push=BTN_PUSH_MENU),
+        reply_markup=main_menu_kb(True),
     )
-    await message.answer(text, reply_markup=main_menu_kb(ok))
 
 
 @router.message(Command("unlock"))
@@ -94,14 +96,18 @@ async def cmd_unlock(message: Message, command, settings: Settings, db: Database
         return
     await db.authorize(message.from_user.id)
     await message.answer(
-        "✅ Доступ к сбору push открыт", reply_markup=main_menu_kb(True)
+        "✅ Доступ открыт\n\n" + WELCOME.format(link=BTN_LINK, push=BTN_PUSH_MENU),
+        reply_markup=main_menu_kb(True),
     )
 
 
 @router.message(Command("lock"))
-async def cmd_lock(message: Message, db: Database):
+async def cmd_lock(message: Message, settings: Settings, db: Database):
+    if _is_admin(settings, message.from_user.id):
+        await message.answer("Админ не может закрыть себе доступ")
+        return
     await db.deauthorize(message.from_user.id)
-    await message.answer("Доступ к сбору push закрыт", reply_markup=main_menu_kb(False))
+    await message.answer("Доступ к боту закрыт", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(Command("users"))
@@ -188,10 +194,9 @@ async def btn_push_menu(message: Message, state: FSMContext, settings: Settings,
 
 
 @router.message(F.text == BTN_BACK)
-async def btn_back(message: Message, state: FSMContext, settings: Settings, db: Database):
+async def btn_back(message: Message, state: FSMContext):
     await state.clear()
-    ok = await can_collect(db, settings, message.from_user.id)
-    await message.answer("Главное меню", reply_markup=main_menu_kb(ok))
+    await message.answer("Главное меню", reply_markup=main_menu_kb(True))
 
 
 @router.message(F.text == BTN_COLLECT)

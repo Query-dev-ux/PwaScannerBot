@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import get_settings
 from app.db import Database
 from app.handlers import get_routers
+from app.middleware import AccessMiddleware
 from app.services.session_manager import SessionManager
 from app.services.webcontrol import WebControl
 
@@ -45,6 +46,11 @@ async def main() -> None:
     dp["settings"] = settings
     dp["db"] = db
     dp["manager"] = manager
+
+    gate = AccessMiddleware(settings, db)
+    dp.message.outer_middleware(gate)
+    dp.callback_query.outer_middleware(gate)
+
     for r in get_routers():
         dp.include_router(r)
 
