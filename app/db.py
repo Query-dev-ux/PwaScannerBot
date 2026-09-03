@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS pushes(
   title TEXT,
   body TEXT,
   icon TEXT,
+  image TEXT,
   url TEXT,
   raw TEXT
 );
@@ -76,6 +77,8 @@ class Database:
             pcols = {r[1] for r in await cur.fetchall()}
             if "stage" not in pcols:
                 await db.execute("ALTER TABLE pushes ADD COLUMN stage TEXT")
+            if "image" not in pcols:
+                await db.execute("ALTER TABLE pushes ADD COLUMN image TEXT")
             # one-off cleanup: earlier builds stored every push-lifecycle event
             # as its own row (received / dispatched / displayed / completed)
             await db.execute(
@@ -212,16 +215,18 @@ class Database:
                 if has_content and not r_has:
                     await db.execute(
                         """UPDATE pushes SET ts=?,stage=?,service=?,event=?,
-                           title=?,body=?,icon=?,url=?,raw=? WHERE id=?""",
+                           title=?,body=?,icon=?,image=?,url=?,raw=? WHERE id=?""",
                         (rec["ts"], rec.get("stage"), rec.get("service"),
                          rec.get("event"), title, body, rec.get("icon"),
-                         rec.get("url"), rec.get("raw"), r["id"]),
+                         rec.get("image"), rec.get("url"), rec.get("raw"),
+                         r["id"]),
                     )
                     await db.commit()
                     return True
             await db.execute(
-                """INSERT INTO pushes(session_id,ts,stage,service,event,title,body,icon,url,raw)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO pushes(session_id,ts,stage,service,event,title,
+                   body,icon,image,url,raw)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id,
                     rec["ts"],
@@ -231,6 +236,7 @@ class Database:
                     rec.get("title"),
                     rec.get("body"),
                     rec.get("icon"),
+                    rec.get("image"),
                     rec.get("url"),
                     rec.get("raw"),
                 ),

@@ -42,7 +42,8 @@ def extract_push_fields(ev: dict) -> dict:
     svc = ev.get("service")
     title = pick("title")
     body = pick("body", "message", "text", "content")
-    icon = pick("icon", "image", "badge")
+    icon = pick("icon", "badge")
+    image = pick("image", "picture", "big picture")
     url = pick("click_action", "landing url", "notification data", "url", "link")
 
     payload = meta.get("Payload") or low.get("payload")
@@ -63,7 +64,9 @@ def extract_push_fields(ev: dict) -> dict:
                 body = (body or c.get("body") or c.get("message") or c.get("text")
                         or (alert if isinstance(alert, str) else None)
                         or (alert.get("body") if isinstance(alert, dict) else None))
-                icon = icon or c.get("icon") or c.get("image")
+                icon = icon or c.get("icon") or c.get("badge")
+                image = (image or c.get("image") or c.get("picture")
+                         or c.get("big_picture") or c.get("banner"))
                 url = (url or c.get("url") or c.get("click_action")
                        or c.get("link") or c.get("landing_url"))
         except Exception:
@@ -71,7 +74,8 @@ def extract_push_fields(ev: dict) -> dict:
 
     if not body and svc == "pushMessaging" and isinstance(payload, str):
         body = payload
-    return {"title": title, "body": body, "icon": icon, "url": url}
+    return {"title": title, "body": body, "icon": icon, "image": image,
+            "url": url}
 
 
 _STAGE_LABEL = {

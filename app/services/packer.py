@@ -28,20 +28,50 @@ def build_pack(row, pushes, sessions_dir: str) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     plist = [dict(p) for p in pushes]
-    # backfill title/body/icon/url for rows stored before the payload parser
+    # backfill title/body/icon/image/url from raw (rows stored before a parser
+    # change, and `image` which older rows never had a column for)
     for p in plist:
         if (p.get("service") or "") == "stage":
             continue
-        if not (p.get("title") or p.get("body")) and p.get("raw"):
+        if p.get("raw"):
             try:
                 from app.utils import extract_push_fields
 
-                ev = json.loads(p["raw"])
-                f = extract_push_fields(ev)
-                p.update({k: v for k, v in f.items() if v})
+                f = extract_push_fields(json.loads(p["raw"]))
+                for k, v in f.items():
+                    if v and not p.get(k):
+                        p[k] = v
             except Exception:
                 pass
     real = [p for p in plist if (p.get("service") or "") != "stage"]
+
+    # pull the notification banner images into the archive
+    img_dir = out_dir / "images"
+    img_map: dict = {}
+    for p in real:
+        src = p.get("image")
+        if not src or src in img_map:
+            if src:
+                p["image_file"] = img_map[src]
+            continue
+        try:
+            import requests
+
+            r = requests.get(src, timeout=20)
+            if r.ok and r.content:
+                img_dir.mkdir(parents=True, exist_ok=True)
+                ext = ".jpg"
+                ct = r.headers.get("content-type", "")
+                if "png" in ct:
+                    ext = ".png"
+                elif "webp" in ct:
+                    ext = ".webp"
+                name = f"images/{len(img_map) + 1:02d}{ext}"
+                (out_dir / name).write_bytes(r.content)
+                img_map[src] = name
+                p["image_file"] = name
+        except Exception:
+            pass
     deep_link = _row_get(row, "deep_link")
 
     by_stage: dict = {}
@@ -90,6 +120,10 @@ def build_pack(row, pushes, sessions_dir: str) -> str:
                 lines.append(f"  {p['title']}")
             if p.get("body"):
                 lines.append(f"  {p['body']}")
+            if p.get("image_file"):
+                lines.append(f"  🖼 {p['image_file']}")
+            elif p.get("image"):
+                lines.append(f"  🖼 {p['image']}")
             if p.get("url"):
                 lines.append(f"  -> {p['url']}")
             if not (p.get("title") or p.get("body")) and p.get("raw"):
@@ -102,4 +136,8 @@ def build_pack(row, pushes, sessions_dir: str) -> str:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(json_path, "pushes.json")
         z.write(txt_path, "pushes.txt")
+        for src, name in img_map.items():
+            fp = out_dir / name
+            if fp.exists():
+                z.write(fp, name)
     return str(zip_path)

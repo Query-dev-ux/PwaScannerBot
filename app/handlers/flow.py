@@ -188,6 +188,23 @@ async def advance_stage(cb: CallbackQuery, manager: SessionManager, db: Database
         pass
 
 
+def _row_img(p) -> str | None:
+    try:
+        v = p["image"]
+    except (KeyError, IndexError, TypeError):
+        v = None
+    if v:
+        return v
+    try:
+        import json as _j
+        from app.utils import extract_push_fields
+        if p["raw"]:
+            return extract_push_fields(_j.loads(p["raw"])).get("image")
+    except Exception:
+        return None
+    return None
+
+
 @router.callback_query(F.data.startswith("pv:"))
 async def view_pushes(cb: CallbackQuery, db: Database):
     session_id = cb.data.split(":", 1)[1]
@@ -214,8 +231,14 @@ async def view_pushes(cb: CallbackQuery, db: Database):
             ts = datetime.fromtimestamp(p["ts"]).strftime("%d.%m %H:%M")
             t = esc(p["title"] or p["event"] or "—")
             b = esc((p["body"] or "").strip())
-            out.append(f"• <b>{ts}</b> {t}" + (f"\n  {b}" if b else ""))
-    await cb.message.answer("\n".join(out)[:4000])
+            img = _row_img(p)
+            line = f"• <b>{ts}</b> {t}"
+            if b:
+                line += f"\n  {b}"
+            if img:
+                line += f'\n  <a href="{esc(img)}">🖼 картинка</a>'
+            out.append(line)
+    await cb.message.answer("\n".join(out)[:4000], disable_web_page_preview=True)
 
 
 @router.callback_query(F.data.startswith("pdl:"))

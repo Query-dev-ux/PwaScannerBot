@@ -257,6 +257,7 @@ class CdpBridge:
             "title": f["title"],
             "body": f["body"],
             "icon": f["icon"],
+            "image": f.get("image"),
             "url": f["url"],
             "raw": json.dumps(ev, ensure_ascii=False),
         }
