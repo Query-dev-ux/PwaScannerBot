@@ -28,10 +28,7 @@ from app.utils import esc, session_card
 
 router = Router()
 
-WELCOME_PUBLIC = (
-    "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA\n\n"
-    "Сбор push-уведомлений — по доступу: <code>/unlock КЛЮЧ</code>"
-)
+WELCOME_PUBLIC = "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA"
 WELCOME_FULL = (
     "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA\n"
     "<b>{push}</b> — запуск сбора push и активные сессии"

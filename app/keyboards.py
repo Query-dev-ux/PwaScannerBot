@@ -57,6 +57,6 @@ def collecting_actions_kb(session_id: str, stage: str | None = None):
         b.button(text=adv[0], callback_data=f"stage:{session_id}:{adv[1]}")
     b.button(text="📥 Пуши списком", callback_data=f"pv:{session_id}")
     b.button(text="📦 Скачать архив", callback_data=f"pdl:{session_id}")
-    b.button(text="⏹ Стоп + финальный архив", callback_data=f"pstop:{session_id}")
+    b.button(text="⏹ Стоп", callback_data=f"pstop:{session_id}")
     b.adjust(1)
     return b.as_markup()
