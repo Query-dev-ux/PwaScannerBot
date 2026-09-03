@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS pushes(
 CREATE INDEX IF NOT EXISTS ix_pushes_session ON pushes(session_id);
 CREATE TABLE IF NOT EXISTS authorized(
   user_id INTEGER PRIMARY KEY,
-  granted_at REAL
+  granted_at REAL,
+  level TEXT DEFAULT 'scan'
 );
 """
 
@@ -73,6 +74,13 @@ class Database:
                 )
             if "push_endpoint" not in scols:
                 await db.execute("ALTER TABLE sessions ADD COLUMN push_endpoint TEXT")
+            cur = await db.execute("PRAGMA table_info(authorized)")
+            acols = {r[1] for r in await cur.fetchall()}
+            if "level" not in acols:
+                # existing users had full access before the two-tier split
+                await db.execute(
+                    "ALTER TABLE authorized ADD COLUMN level TEXT DEFAULT 'push'"
+                )
             cur = await db.execute("PRAGMA table_info(pushes)")
             pcols = {r[1] for r in await cur.fetchall()}
             if "stage" not in pcols:
@@ -168,20 +176,28 @@ class Database:
             return await cur.fetchall()
 
     # ---------- access ----------
-    async def is_authorized(self, user_id: int) -> bool:
+    async def auth_level(self, user_id: int) -> str | None:
+        """Stored access tier for the user: 'push', 'scan' or None."""
         async with self._conn() as db:
             cur = await db.execute(
-                "SELECT 1 FROM authorized WHERE user_id=?", (user_id,)
+                "SELECT level FROM authorized WHERE user_id=?", (user_id,)
             )
-            return await cur.fetchone() is not None
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return row["level"] or "scan"
 
-    async def authorize(self, user_id: int) -> None:
+    async def is_authorized(self, user_id: int) -> bool:
+        return await self.auth_level(user_id) is not None
+
+    async def authorize(self, user_id: int, level: str = "scan") -> None:
         import time
 
         async with self._conn() as db:
             await db.execute(
-                "INSERT OR REPLACE INTO authorized(user_id,granted_at) VALUES(?,?)",
-                (user_id, time.time()),
+                "INSERT OR REPLACE INTO authorized(user_id,granted_at,level) "
+                "VALUES(?,?,?)",
+                (user_id, time.time(), level),
             )
             await db.commit()
 
@@ -190,12 +206,12 @@ class Database:
             await db.execute("DELETE FROM authorized WHERE user_id=?", (user_id,))
             await db.commit()
 
-    async def list_authorized(self) -> list[int]:
+    async def list_authorized(self) -> list[tuple[int, str]]:
         async with self._conn() as db:
             cur = await db.execute(
-                "SELECT user_id FROM authorized ORDER BY granted_at"
+                "SELECT user_id, level FROM authorized ORDER BY granted_at"
             )
-            return [r[0] for r in await cur.fetchall()]
+            return [(r[0], r[1] or "scan") for r in await cur.fetchall()]
 
     # ---------- pushes ----------
     async def add_push(self, session_id: str, rec: dict[str, Any]) -> bool:

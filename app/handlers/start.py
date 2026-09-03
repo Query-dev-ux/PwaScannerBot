@@ -5,7 +5,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardRemove
 
-from app.access import NEED_KEY, can_collect
+from app.access import NEED_KEY, NEED_PUSH, access_level, can_collect, can_push
 from app.config import Settings
 from app.db import Database
 from app.keyboards import (
@@ -26,8 +26,9 @@ from app.utils import esc, session_card
 
 router = Router()
 
-WELCOME = (
-    "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA\n"
+WELCOME_SCAN = "<b>{link}</b> — пробить клоаку и достать ссылку внутри PWA"
+WELCOME_PUSH = (
+    WELCOME_SCAN + "\n"
     "<b>{push}</b> — запуск сбора push и активные сессии"
 )
 LOCKED = "🔒 Доступ к боту закрыт\n\nОткрыть: <code>/unlock КЛЮЧ</code>"
@@ -35,6 +36,11 @@ LOCKED = "🔒 Доступ к боту закрыт\n\nОткрыть: <code>/u
 
 def _is_admin(settings: Settings, user_id: int) -> bool:
     return not settings.admin_ids or user_id in settings.admin_ids
+
+
+def _welcome(level: str) -> str:
+    tmpl = WELCOME_PUSH if level == "push" else WELCOME_SCAN
+    return tmpl.format(link=BTN_LINK, push=BTN_PUSH_MENU)
 
 
 async def _begin_scan(
@@ -76,28 +82,34 @@ async def _show_sessions(message: Message, db: Database) -> None:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, settings: Settings, db: Database):
     await state.clear()
-    if not await can_collect(db, settings, message.from_user.id):
+    level = await access_level(db, settings, message.from_user.id)
+    if level is None:
         await message.answer(LOCKED, reply_markup=ReplyKeyboardRemove())
         return
     await message.answer(
-        WELCOME.format(link=BTN_LINK, push=BTN_PUSH_MENU),
-        reply_markup=main_menu_kb(True),
+        _welcome(level),
+        reply_markup=main_menu_kb(level == "push"),
     )
 
 
 @router.message(Command("unlock"))
 async def cmd_unlock(message: Message, command, settings: Settings, db: Database):
     key = (command.args or "").strip()
-    if not settings.access_key:
-        await message.answer("Доступ по ключу не настроен (ACCESS_KEY)")
+    if not settings.access_key and not settings.push_key:
+        await message.answer("Доступ по ключу не настроен (ACCESS_KEY / PUSH_KEY)")
         return
-    if key != settings.access_key:
+    if settings.push_key and key == settings.push_key:
+        level = "push"
+    elif settings.access_key and key == settings.access_key:
+        level = "scan"
+    else:
         await message.answer("Неверный ключ")
         return
-    await db.authorize(message.from_user.id)
+    await db.authorize(message.from_user.id, level)
+    tier = "с пушами" if level == "push" else "сканер PWA"
     await message.answer(
-        "✅ Доступ открыт\n\n" + WELCOME.format(link=BTN_LINK, push=BTN_PUSH_MENU),
-        reply_markup=main_menu_kb(True),
+        f"✅ Доступ открыт ({tier})\n\n" + _welcome(level),
+        reply_markup=main_menu_kb(level == "push"),
     )
 
 
@@ -115,13 +127,15 @@ async def cmd_users(message: Message, settings: Settings, db: Database):
     if not _is_admin(settings, message.from_user.id):
         await message.answer("Только для админа")
         return
-    ids = await db.list_authorized()
-    if not ids:
+    rows = await db.list_authorized()
+    if not rows:
         await message.answer("Нет пользователей с доступом")
         return
-    lines = ["<b>Доступ к сбору push:</b>"]
-    lines += [f"• <code>{uid}</code>" for uid in ids]
-    lines.append("\nОтозвать: <code>/revoke ID</code>")
+    tag = {"push": "🔔 пуши", "scan": "🔎 сканер"}
+    lines = ["<b>Доступ:</b>"]
+    lines += [f"• <code>{uid}</code> — {tag.get(lvl, lvl)}" for uid, lvl in rows]
+    lines.append("\nВыдать: <code>/grant ID [push|scan]</code>")
+    lines.append("Отозвать: <code>/revoke ID</code>")
     await message.answer("\n".join(lines))
 
 
@@ -130,12 +144,19 @@ async def cmd_grant(message: Message, command, settings: Settings, db: Database)
     if not _is_admin(settings, message.from_user.id):
         await message.answer("Только для админа")
         return
-    arg = (command.args or "").strip()
-    if not arg.lstrip("-").isdigit():
-        await message.answer("Формат: <code>/grant ID</code>")
+    parts = (command.args or "").split()
+    if not parts or not parts[0].lstrip("-").isdigit():
+        await message.answer("Формат: <code>/grant ID [push|scan]</code>")
         return
-    await db.authorize(int(arg))
-    await message.answer(f"✅ Доступ выдан пользователю <code>{arg}</code>")
+    level = parts[1].lower() if len(parts) > 1 else "push"
+    if level not in ("push", "scan"):
+        await message.answer("Уровень: <code>push</code> или <code>scan</code>")
+        return
+    await db.authorize(int(parts[0]), level)
+    tier = "с пушами" if level == "push" else "сканер PWA"
+    await message.answer(
+        f"✅ Доступ выдан пользователю <code>{parts[0]}</code> ({tier})"
+    )
 
 
 @router.message(Command("revoke"))
@@ -166,8 +187,8 @@ async def cmd_revoke(
     await message.answer(f"🚫 Доступ отозван у <code>{uid}</code>{tail}")
     try:
         await message.bot.send_message(
-            uid, "🚫 Доступ к сбору push отозван",
-            reply_markup=main_menu_kb(False),
+            uid, "🚫 Доступ к боту отозван",
+            reply_markup=ReplyKeyboardRemove(),
         )
     except Exception:  # noqa: BLE001
         pass
@@ -182,8 +203,8 @@ async def btn_link(message: Message, state: FSMContext, settings: Settings):
 @router.message(F.text == BTN_PUSH_MENU)
 async def btn_push_menu(message: Message, state: FSMContext, settings: Settings, db: Database):
     await state.clear()
-    if not await can_collect(db, settings, message.from_user.id):
-        await message.answer(NEED_KEY)
+    if not await can_push(db, settings, message.from_user.id):
+        await message.answer(NEED_PUSH)
         return
     await message.answer(
         f"<b>{BTN_PUSH_MENU}</b>\n\n"
@@ -194,16 +215,17 @@ async def btn_push_menu(message: Message, state: FSMContext, settings: Settings,
 
 
 @router.message(F.text == BTN_BACK)
-async def btn_back(message: Message, state: FSMContext):
+async def btn_back(message: Message, state: FSMContext, settings: Settings, db: Database):
     await state.clear()
-    await message.answer("Главное меню", reply_markup=main_menu_kb(True))
+    is_push = await can_push(db, settings, message.from_user.id)
+    await message.answer("Главное меню", reply_markup=main_menu_kb(is_push))
 
 
 @router.message(F.text == BTN_COLLECT)
 async def btn_collect(message: Message, state: FSMContext, settings: Settings, db: Database):
     await state.clear()
-    if not await can_collect(db, settings, message.from_user.id):
-        await message.answer(NEED_KEY)
+    if not await can_push(db, settings, message.from_user.id):
+        await message.answer(NEED_PUSH)
         return
     await _begin_scan(message, state, settings, mode="collect")
 
@@ -211,8 +233,8 @@ async def btn_collect(message: Message, state: FSMContext, settings: Settings, d
 @router.message(F.text == BTN_SESSIONS)
 async def btn_sessions(message: Message, state: FSMContext, settings: Settings, db: Database):
     await state.clear()
-    if not await can_collect(db, settings, message.from_user.id):
-        await message.answer(NEED_KEY)
+    if not await can_push(db, settings, message.from_user.id):
+        await message.answer(NEED_PUSH)
         return
     await _show_sessions(message, db)
 
@@ -237,8 +259,8 @@ async def cmd_js(message: Message, state: FSMContext, settings: Settings, db: Da
 
 @router.message(Command("status"))
 async def cmd_status(message: Message, settings: Settings, db: Database):
-    if not await can_collect(db, settings, message.from_user.id):
-        await message.answer(NEED_KEY)
+    if not await can_push(db, settings, message.from_user.id):
+        await message.answer(NEED_PUSH)
         return
     await _show_sessions(message, db)
 
@@ -247,8 +269,8 @@ async def cmd_status(message: Message, settings: Settings, db: Database):
 async def cmd_subcheck(message: Message, settings: Settings, db: Database,
                        manager: SessionManager):
     import asyncio as _a
-    if not await can_collect(db, settings, message.from_user.id):
-        await message.answer(NEED_KEY)
+    if not await can_push(db, settings, message.from_user.id):
+        await message.answer(NEED_PUSH)
         return
     sids = list(manager._sessions)
     if not sids:

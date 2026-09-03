@@ -35,8 +35,11 @@ class Settings(BaseSettings):
 
     qa_token: str = Field(default="", alias="QA_TOKEN")
 
-    # Unlocks the Push-collection features. Users run /unlock <key>.
+    # Two access tiers, both unlocked with /unlock <key>:
+    #   ACCESS_KEY → "scan" tier (only "🔎 Сканер PWA")
+    #   PUSH_KEY   → "push" tier (everything, incl. push collection)
     access_key: str = Field(default="", alias="ACCESS_KEY")
+    push_key: str = Field(default="", alias="PUSH_KEY")
 
     # Live browser control (screencast) web server
     webcontrol_host: str = Field(default="0.0.0.0", alias="WEBCONTROL_HOST")

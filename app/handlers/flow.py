@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.access import NEED_KEY, can_collect
+from app.access import NEED_PUSH, can_push
 from app.config import Settings
 from app.db import Database
 from app.keyboards import collecting_actions_kb, enable_push_kb
@@ -278,8 +278,8 @@ async def cancel_all(
     db: Database, settings: Settings,
 ):
     await state.clear()
-    if not await can_collect(db, settings, message.from_user.id):
-        await message.answer(NEED_KEY)
+    if not await can_push(db, settings, message.from_user.id):
+        await message.answer(NEED_PUSH)
         return
     n = 0
     for sid in list(manager._sessions):
