@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -2760,10 +2761,20 @@ class SessionManager:
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=30)
             except asyncio.TimeoutError:
+                # dump exactly where the stuck coroutine is suspended right
+                # now — this is the whole reason for the shield() approach:
+                # the task is still alive and we can inspect it instead of
+                # having cancelled it away
+                stack = io.StringIO()
+                try:
+                    task.print_stack(file=stack)
+                except Exception:
+                    pass
                 log.warning(
                     "session %s: live view activation still running after "
                     "30s — streaming current page as-is, letting it finish "
-                    "in the background", sess["id"][:8])
+                    "in the background. Stuck at:\n%s",
+                    sess["id"][:8], stack.getvalue())
             except Exception as e:  # noqa: BLE001
                 log.warning("ctl view activation failed: %s", e)
         else:
