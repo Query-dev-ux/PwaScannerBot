@@ -34,18 +34,28 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
   border:2.5px solid #2a2a2a;border-top-color:#8c8;animation:spin .8s linear infinite}
  @keyframes spin{to{transform:rotate(360deg)}}
  #st{color:#8c8;padding:2px 6px;align-self:center}
+ /* invisible proxy input: the streamed page is just pixels on a <canvas>,
+    so tapping a form field in it can't focus anything real and iOS never
+    shows a keyboard. Tapping the ⌨️ button focuses THIS instead — a real,
+    on-screen (if invisible) input — which does trigger the keyboard; its
+    keystrokes get relayed to the actual session. pointer-events:none so
+    it never itself intercepts a tap meant for the canvas underneath. */
+ #kbd{position:absolute;left:0;bottom:0;width:1px;height:1px;padding:0;border:0;
+  opacity:0;font-size:16px;pointer-events:none}
 </style></head><body><div id=wrap>
 <div id=bar>
  <button onclick="nav('back')">◀</button>
  <button onclick="nav('reload')">⟳</button>
  <input id=url placeholder="https://…" onkeydown="if(event.key==='Enter')go()">
  <button onclick="go()">GO</button>
+ <button onclick="kbd.focus()" title="Показать клавиатуру">⌨️</button>
  <span id=st>connecting…</span>
 </div>
-<div id=stage><canvas id=screen></canvas><div id=loading>Ожидание кадра…</div></div>
+<div id=stage><canvas id=screen></canvas><div id=loading>Ожидание кадра…</div>
+ <input id=kbd autocomplete=off autocapitalize=off autocorrect=off spellcheck=false></div>
 </div><script>
 const cv=document.getElementById('screen'),cx=cv.getContext('2d'),st=document.getElementById('st'),
-      loading=document.getElementById('loading');
+      loading=document.getElementById('loading'),kbd=document.getElementById('kbd');
 let fw=390,fh=844,ws,img=new Image(),first=true;
 img.onload=()=>{cv.width=fw;cv.height=fh;cx.drawImage(img,0,0,fw,fh);
  if(first){first=false;loading.style.display='none'}};
@@ -75,11 +85,31 @@ cv.addEventListener('pointerup',e=>sendMouse('mouseReleased',e));
 cv.addEventListener('pointermove',e=>{if(e.buttons)sendMouse('mouseMoved',e)});
 cv.addEventListener('wheel',e=>{e.preventDefault();const p=pt(e);
  ws&&ws.send(JSON.stringify({t:'wheel',x:p.x,y:p.y,dx:e.deltaX,dy:e.deltaY}))},{passive:false});
-addEventListener('keydown',e=>{if(e.target.id==='url')return;e.preventDefault();
+addEventListener('keydown',e=>{if(e.target.id==='url'||e.target.id==='kbd')return;e.preventDefault();
  ws&&ws.send(JSON.stringify({t:'key',type:'keyDown',key:e.key,code:e.code,
   keyCode:e.keyCode,text:e.key.length===1?e.key:''}))});
-addEventListener('keyup',e=>{if(e.target.id==='url')return;
+addEventListener('keyup',e=>{if(e.target.id==='url'||e.target.id==='kbd')return;
  ws&&ws.send(JSON.stringify({t:'key',type:'keyUp',key:e.key,code:e.code,keyCode:e.keyCode}))});
+// mobile virtual keyboards often don't fire clean keydown/keyup (autocorrect,
+// predictive text, IME composition) — 'input' with e.data is what actually
+// carries the typed character reliably there; Enter/Backspace still need
+// real key events since they're not "inserted text".
+kbd.addEventListener('input',e=>{
+ if(e.inputType==='deleteContentBackward'){
+  ws&&ws.send(JSON.stringify({t:'key',type:'keyDown',key:'Backspace',code:'Backspace',keyCode:8}));
+  ws&&ws.send(JSON.stringify({t:'key',type:'keyUp',key:'Backspace',code:'Backspace',keyCode:8}));
+ }else if(e.data){
+  ws&&ws.send(JSON.stringify({t:'text',text:e.data}));
+ }
+ kbd.value='';
+});
+kbd.addEventListener('keydown',e=>{
+ if(e.key==='Enter'){
+  e.preventDefault();
+  ws&&ws.send(JSON.stringify({t:'key',type:'keyDown',key:'Enter',code:'Enter',keyCode:13,text:'\r'}));
+  ws&&ws.send(JSON.stringify({t:'key',type:'keyUp',key:'Enter',code:'Enter',keyCode:13}));
+ }
+});
 function nav(a){ws&&ws.send(JSON.stringify({t:'nav',a}))}
 function go(){const u=document.getElementById('url').value.trim();if(u)ws&&ws.send(JSON.stringify({t:'nav',a:'open',url:u}))}
 connect();
@@ -239,6 +269,11 @@ def _dispatch(bridge, m: dict) -> None:
         if m.get("text"):
             p["text"] = m["text"]
         bridge.send_input([{"method": "Input.dispatchKeyEvent", "params": p}])
+    elif t == "text" and m.get("text"):
+        # mobile virtual keyboards (autocorrect/predictive text/IME) don't
+        # give clean per-keystroke key events — insert the composed text
+        # from the proxy input's own 'input' event directly instead
+        bridge.send_input([{"method": "Input.insertText", "params": {"text": m["text"]}}])
     elif t == "nav":
         a = m.get("a")
         if a == "open" and m.get("url"):
