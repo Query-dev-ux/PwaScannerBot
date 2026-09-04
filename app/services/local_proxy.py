@@ -100,12 +100,21 @@ class LocalProxy:
         self.upstream = new_upstream
         if self._handler:
             self._handler.close()
+            # Force-close every accepted connection BEFORE awaiting
+            # wait_closed(). As of Python 3.12, Server.wait_closed() waits
+            # for the listener AND every active connection to finish
+            # (before 3.12 it only tracked the listener) — if nothing tells
+            # those connections to close, wait_closed() hangs until they die
+            # on their own (pproxy's own ~60s socket timeout), which is
+            # exactly the multi-minute "This site can't be reached" hang
+            # this was supposed to fix. Closing them first makes
+            # wait_closed() resolve almost immediately instead.
+            self._close_active_connections()
             try:
                 await self._handler.wait_closed()
             except Exception:
                 pass
             self._handler = None
-        self._close_active_connections()
         last_err: Exception | None = None
         for attempt in range(5):
             try:
