@@ -10,7 +10,7 @@ from aiohttp import WSMsgType, web
 log = logging.getLogger(__name__)
 
 _PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Session browser</title>
 <style>
  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -23,9 +23,9 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
  #bar button:active{background:#444}
  #bar input{font-size:16px;min-height:44px;padding:8px 10px;border:0;border-radius:8px;
   background:#333;color:#eee;flex:1;min-width:100px}
- /* iOS Safari auto-zooms any input under 16px on focus; with pinch-zoom
-    disabled above that fights the zoom and can keep the keyboard from
-    opening at all. 16px sidesteps it. */
+ /* 16px avoids iOS Safari's auto-zoom-on-focus for small inputs; kept even
+    though pinch-zoom is no longer blocked, since that auto-zoom is still
+    an unwanted jump on every tap. */
  #stage{flex:1;position:relative;overflow:hidden;min-height:0;background:#000}
  #screen{width:100%;height:100%;object-fit:contain;touch-action:none;cursor:crosshair}
  #loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -48,7 +48,7 @@ const cv=document.getElementById('screen'),cx=cv.getContext('2d'),st=document.ge
       loading=document.getElementById('loading');
 let fw=390,fh=844,ws,img=new Image(),first=true;
 img.onload=()=>{cv.width=fw;cv.height=fh;cx.drawImage(img,0,0,fw,fh);
- if(first){first=false;loading.hidden=true}};
+ if(first){first=false;loading.style.display='none'}};
 function connect(){
  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+location.pathname+'/ws');
  ws.onopen=()=>st.textContent='live';
