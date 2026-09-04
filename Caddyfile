@@ -1,3 +1,17 @@
+{
+	# HTTP/3 (QUIC) is Caddy's default alongside h1/h2. WebSocket doesn't
+	# ride the same transport under HTTP/3 as it does under HTTP/1.1
+	# (RFC 9220, needs explicit support on both ends), and some clients
+	# behaved oddly with it enabled here: the plain HTTPS page loaded fine
+	# but the WebSocket upgrade for the live-browser stream never even
+	# reached this proxy. h1 is the transport WebSocket has always worked
+	# over — this is an internal admin tool, not a public site that needs
+	# h2/h3's performance benefits.
+	servers {
+		protocols h1
+	}
+}
+
 {$DOMAIN} {
 	reverse_proxy bot:{$WEBCONTROL_PORT}
 }
