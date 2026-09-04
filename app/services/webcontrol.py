@@ -21,10 +21,18 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
  #bar button{font:15px system-ui;min-width:44px;min-height:44px;padding:8px 12px;border:0;
   border-radius:8px;background:#333;color:#eee;-webkit-user-select:none;user-select:none}
  #bar button:active{background:#444}
- #bar input{font:15px system-ui;min-height:44px;padding:8px 10px;border:0;border-radius:8px;
+ #bar input{font-size:16px;min-height:44px;padding:8px 10px;border:0;border-radius:8px;
   background:#333;color:#eee;flex:1;min-width:100px}
- #stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;min-height:0}
- #screen{max-width:100%;max-height:100%;touch-action:none;background:#000;cursor:crosshair}
+ /* iOS Safari auto-zooms any input under 16px on focus; with pinch-zoom
+    disabled above that fights the zoom and can keep the keyboard from
+    opening at all. 16px sidesteps it. */
+ #stage{flex:1;position:relative;overflow:hidden;min-height:0;background:#000}
+ #screen{width:100%;height:100%;object-fit:contain;touch-action:none;cursor:crosshair}
+ #loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:#8c8;font:14px system-ui;pointer-events:none}
+ #loading::before{content:'';width:22px;height:22px;margin-right:10px;border-radius:50%;
+  border:2.5px solid #2a2a2a;border-top-color:#8c8;animation:spin .8s linear infinite}
+ @keyframes spin{to{transform:rotate(360deg)}}
  #st{color:#8c8;padding:2px 6px;align-self:center}
 </style></head><body><div id=wrap>
 <div id=bar>
@@ -34,11 +42,13 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
  <button onclick="go()">GO</button>
  <span id=st>connecting…</span>
 </div>
-<div id=stage><canvas id=screen></canvas></div>
+<div id=stage><canvas id=screen></canvas><div id=loading>Ожидание кадра…</div></div>
 </div><script>
-const cv=document.getElementById('screen'),cx=cv.getContext('2d'),st=document.getElementById('st');
-let fw=390,fh=844,ws,img=new Image();
-img.onload=()=>{cv.width=fw;cv.height=fh;cx.drawImage(img,0,0,fw,fh)};
+const cv=document.getElementById('screen'),cx=cv.getContext('2d'),st=document.getElementById('st'),
+      loading=document.getElementById('loading');
+let fw=390,fh=844,ws,img=new Image(),first=true;
+img.onload=()=>{cv.width=fw;cv.height=fh;cx.drawImage(img,0,0,fw,fh);
+ if(first){first=false;loading.hidden=true}};
 function connect(){
  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+location.pathname+'/ws');
  ws.onopen=()=>st.textContent='live';
@@ -47,9 +57,17 @@ function connect(){
   if(m.t==='frame'){if(m.w){fw=m.w;fh=m.h}img.src='data:image/jpeg;base64,'+m.d}
   else if(m.t==='info'){st.textContent=m.s}};
 }
-function pt(e){const r=cv.getBoundingClientRect();return{
- x:Math.round((e.clientX-r.left)/r.width*fw),
- y:Math.round((e.clientY-r.top)/r.height*fh)};}
+function pt(e){
+ // canvas element now fills #stage (object-fit:contain draws the actual
+ // frame letterboxed inside it) — map through the letterboxed content box,
+ // not the element's full bounding box, or clicks near the edges land on
+ // the wrong pixel (or in the empty margin) once the aspect ratios differ.
+ const r=cv.getBoundingClientRect();
+ const scale=Math.min(r.width/fw,r.height/fh);
+ const dispW=fw*scale,dispH=fh*scale;
+ const offX=r.left+(r.width-dispW)/2,offY=r.top+(r.height-dispH)/2;
+ return{x:Math.round((e.clientX-offX)/scale),y:Math.round((e.clientY-offY)/scale)};
+}
 function sendMouse(type,e,btn){const p=pt(e);ws&&ws.send(JSON.stringify(
  {t:'mouse',type,x:p.x,y:p.y,button:btn||'left'}))}
 cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);sendMouse('mousePressed',e)});
