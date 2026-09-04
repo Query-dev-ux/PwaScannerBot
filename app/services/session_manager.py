@@ -815,6 +815,7 @@ class SessionManager:
                 "push_subscribed": info.get("push_subscribed", False),
                 "push_endpoint": info.get("push_endpoint"),
                 "push_by": info.get("push_by"),
+                "_drv_lock": asyncio.Lock(),
             }
 
             return InspectResult(
@@ -2640,7 +2641,7 @@ class SessionManager:
         # proxy comes back on demand while the live browser is open (register /
         # deposit need the geo), via _on_ctl_view.
         if sess.get("push_subscribed"):
-            await self._use_direct(sess)
+            await self._use_direct(sess, "subscribed, idling")
 
         return PushInfo(
             expires_at, STAGE_INSTALL, sess["pwa_name"],
@@ -2648,7 +2649,7 @@ class SessionManager:
             sess.get("push_subscribed", False), sess.get("push_endpoint"),
         )
 
-    async def _use_direct(self, sess: dict) -> None:
+    async def _use_direct(self, sess: dict, why: str = "") -> None:
         """Drop the paid proxy — the session idles proxyless (pushes arrive
         over the browser's FCM connection, which is geo-agnostic)."""
         lp = sess.get("local_proxy")
@@ -2657,13 +2658,14 @@ class SessionManager:
         try:
             await lp.swap("direct")
             sess["net"] = "direct"
-            log.info("session %s -> direct (proxy released)", sess["id"][:8])
+            log.info("session %s -> direct%s", sess["id"][:8],
+                      f" ({why})" if why else "")
         except Exception as e:  # noqa: BLE001
             log.warning("swap to direct failed: %s", e)
 
-    async def _use_proxy(self, sess: dict) -> None:
+    async def _use_proxy(self, sess: dict, why: str = "") -> None:
         """Bring the scan proxy back up — needed to load the geo-gated
-        casino/funnel in the live browser (register / deposit)."""
+        casino/funnel (live browser, re-subscribe health checks, ...)."""
         lp = sess.get("local_proxy")
         up = sess.get("scan_upstream")
         if not lp or not up or sess.get("net") == "proxy":
@@ -2671,7 +2673,8 @@ class SessionManager:
         try:
             await lp.swap(up)
             sess["net"] = "proxy"
-            log.info("session %s -> proxy (live browser opened)", sess["id"][:8])
+            log.info("session %s -> proxy%s", sess["id"][:8],
+                      f" ({why})" if why else "")
         except Exception as e:  # noqa: BLE001
             log.warning("swap to proxy failed: %s", e)
 
@@ -2723,15 +2726,22 @@ class SessionManager:
             prev.cancel()
         if active:
             try:
-                await self._use_proxy(sess)
-                await asyncio.to_thread(self._restore_view, sess["driver"], sess)
+                await self._use_proxy(sess, "live browser opened")
+                # serialize against any background job that's mid-navigation
+                # on this same Selenium driver (health-check re-subscribes,
+                # etc.) — two concurrent driver.get() calls can abort each
+                # other's in-flight connection, which looks exactly like a
+                # network error in the live view
+                async with sess["_drv_lock"]:
+                    await asyncio.to_thread(
+                        self._restore_view, sess["driver"], sess)
             except Exception as e:  # noqa: BLE001
                 log.warning("ctl view activation failed: %s", e)
         else:
             async def _later():
                 await asyncio.sleep(25)
                 if not sess.get("ctl_active"):
-                    await self._use_direct(sess)
+                    await self._use_direct(sess, "live browser closed")
             sess["_ctl_grace"] = asyncio.create_task(_later())
 
     def _start_observer(self, session_id: str, sess: dict) -> None:
@@ -2778,8 +2788,9 @@ class SessionManager:
         await self.db.set_session_fields(session_id, stage=stage)
         # after deposit there's no more manual interaction — free the page RAM
         if stage == STAGE_DEPOSIT:
-            await self._use_direct(sess)
-            await asyncio.to_thread(self._park_session, sess)
+            await self._use_direct(sess, "deposit stage, parking")
+            async with sess["_drv_lock"]:
+                await asyncio.to_thread(self._park_session, sess)
         # drop a marker into the push stream so the pack shows the transition
         sess["push_queue"].append(
             {
@@ -2821,29 +2832,33 @@ class SessionManager:
                     and not sess.get("parked")):
                 sess.pop("_verify_sub_at", None)
                 origin = origin_of(sess["start_url"])
-                st = await asyncio.to_thread(
-                    self._subscription_alive, sess["driver"], origin)
-                alive = st.get("alive")
-                log.info("post-push sub check %s: alive=%s", sid[:8], alive)
-                msg = ("✅ Пуш получен, подписка жива"
-                       if alive else
-                       "⚠️ Пуш получен, но Chrome отозвал подписку — "
-                       "переподписываюсь")
-                try:
-                    await self.bot.send_message(sess["chat_id"], msg)
-                except Exception:
-                    pass
-                if not alive:
-                    await self._use_proxy(sess)  # re-subscribe needs the geo
-                    va = await asyncio.to_thread(
-                        self._vapp_subscribe, sess["driver"], sess["start_url"])
-                    if va.get("endpoint"):
-                        sess["push_endpoint"] = va["endpoint"]
-                        await self.db.set_session_fields(
-                            sid, push_subscribed=1,
-                            push_endpoint=va["endpoint"])
-                    if not sess.get("ctl_active"):
-                        await self._use_direct(sess)
+                # serialize against a concurrent live-view restore/navigate
+                # on the same driver (see _on_ctl_view)
+                async with sess["_drv_lock"]:
+                    st = await asyncio.to_thread(
+                        self._subscription_alive, sess["driver"], origin)
+                    alive = st.get("alive")
+                    log.info("post-push sub check %s: alive=%s", sid[:8], alive)
+                    msg = ("✅ Пуш получен, подписка жива"
+                           if alive else
+                           "⚠️ Пуш получен, но Chrome отозвал подписку — "
+                           "переподписываюсь")
+                    try:
+                        await self.bot.send_message(sess["chat_id"], msg)
+                    except Exception:
+                        pass
+                    if not alive:
+                        # re-subscribe needs the geo
+                        await self._use_proxy(sess, "post-push resubscribe")
+                        va = await asyncio.to_thread(
+                            self._vapp_subscribe, sess["driver"], sess["start_url"])
+                        if va.get("endpoint"):
+                            sess["push_endpoint"] = va["endpoint"]
+                            await self.db.set_session_fields(
+                                sid, push_subscribed=1,
+                                push_endpoint=va["endpoint"])
+                        if not sess.get("ctl_active"):
+                            await self._use_direct(sess, "post-push resubscribe done")
 
     _SUB_ALIVE_JS = r"""
     const cb = arguments[arguments.length - 1];
@@ -2953,21 +2968,24 @@ class SessionManager:
                     and not sess.get("parked") and now - last > 1080):
                 sess["_sub_check_at"] = now
                 origin = origin_of(sess["start_url"])
-                st = await asyncio.to_thread(
-                    self._subscription_alive, sess["driver"], origin)
-                if not st.get("alive"):
-                    log.warning("session %s subscription gone — re-subscribing",
-                                sid[:8])
-                    await self._use_proxy(sess)
-                    va = await asyncio.to_thread(
-                        self._vapp_subscribe, sess["driver"], sess["start_url"])
-                    if va.get("endpoint"):
-                        sess["push_endpoint"] = va["endpoint"]
-                        await self.db.set_session_fields(
-                            sid, push_subscribed=1, push_endpoint=va["endpoint"])
-                        log.info("session %s re-subscribed", sid[:8])
-                    if not sess.get("ctl_active"):
-                        await self._use_direct(sess)
+                # serialize against a concurrent live-view restore/navigate
+                # on the same driver (see _on_ctl_view)
+                async with sess["_drv_lock"]:
+                    st = await asyncio.to_thread(
+                        self._subscription_alive, sess["driver"], origin)
+                    if not st.get("alive"):
+                        log.warning("session %s subscription gone — re-subscribing",
+                                    sid[:8])
+                        await self._use_proxy(sess, "18-min health check resubscribe")
+                        va = await asyncio.to_thread(
+                            self._vapp_subscribe, sess["driver"], sess["start_url"])
+                        if va.get("endpoint"):
+                            sess["push_endpoint"] = va["endpoint"]
+                            await self.db.set_session_fields(
+                                sid, push_subscribed=1, push_endpoint=va["endpoint"])
+                            log.info("session %s re-subscribed", sid[:8])
+                        if not sess.get("ctl_active"):
+                            await self._use_direct(sess, "health check resubscribe done")
 
             if sess.get("stage") != STAGE_INSTALL:
                 continue
@@ -2979,9 +2997,10 @@ class SessionManager:
             if sess.get("ctl_active"):
                 continue
             try:
-                launch = await asyncio.to_thread(
-                    self._launch_pwa, sess["driver"], sess["start_url"]
-                )
+                async with sess["_drv_lock"]:
+                    launch = await asyncio.to_thread(
+                        self._launch_pwa, sess["driver"], sess["start_url"]
+                    )
             except Exception as e:  # noqa: BLE001
                 log.warning("retry_subscriptions %s: %s", sid[:8], e)
                 continue
@@ -3278,10 +3297,11 @@ class SessionManager:
             "push_endpoint": row["push_endpoint"],
             "push_by": "funnel" if row["push_subscribed"] else None,
             "expires_at": row["expires_at"],
+            "_drv_lock": asyncio.Lock(),
         }
         self._sessions[sid] = sess
         await asyncio.to_thread(self._start_observer, sid, sess)
         if idle_direct:
-            await self._use_direct(sess)
+            await self._use_direct(sess, "restored, already subscribed")
         log.info("restored %s (%s, stage=%s, sub=%s)", sid[:8],
                  row["pwa_name"], sess["stage"], sess["push_subscribed"])
