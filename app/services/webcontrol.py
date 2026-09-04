@@ -126,7 +126,15 @@ class WebControl:
             raise web.HTTPNotFound()
         bridge = entry["bridge"]
         ws = web.WebSocketResponse(heartbeat=25)
-        await ws.prepare(request)
+        try:
+            await ws.prepare(request)
+        except web.HTTPBadRequest as e:
+            log.warning(
+                "ws handshake rejected for %s (%s): %s | headers: %s",
+                request.remote, request.headers.get("User-Agent", "?"),
+                e.text, dict(request.headers),
+            )
+            raise
         loop = asyncio.get_running_loop()
         q: asyncio.Queue = asyncio.Queue(maxsize=1)
 
