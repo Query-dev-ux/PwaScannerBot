@@ -141,8 +141,11 @@ class WebControl:
 
         on_view = entry.get("on_view")
         if on_view:
+            # awaited: the proxy attach + page-restore this triggers must
+            # finish before we start streaming, or the first frames can show
+            # a stale/parked page (see SessionManager._on_ctl_view)
             with contextlib.suppress(Exception):
-                on_view(True)
+                await on_view(True)
         bridge.set_frame_sink(sink)
         sender = asyncio.create_task(_pump(ws, q))
         try:
@@ -156,7 +159,7 @@ class WebControl:
             bridge.set_frame_sink(None)
             if on_view:
                 with contextlib.suppress(Exception):
-                    on_view(False)
+                    await on_view(False)
         return ws
 
 

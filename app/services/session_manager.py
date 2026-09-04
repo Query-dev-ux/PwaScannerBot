@@ -2692,27 +2692,30 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("restore view failed: %s", e)
 
-    def _on_ctl_view(self, sess: dict, active: bool) -> None:
-        """Sync callback from the web-control WS: bring the proxy up while the
-        live browser is open, drop it (after a grace period) when it closes."""
+    async def _on_ctl_view(self, sess: dict, active: bool) -> None:
+        """Callback from the web-control WS, awaited before it starts
+        streaming: bring the proxy up (and the tab back from wherever a
+        background job parked it) while the live browser is open, drop the
+        proxy (after a grace period) when it closes. Awaiting this — instead
+        of firing it and forgetting — closes a race where the very first
+        screencast frames could go out before the proxy/page were ready,
+        which showed up as a stuck blank/error page in the live view."""
         sess["ctl_active"] = active
-        loop = self._loop
-        if not loop:
-            return
         prev = sess.pop("_ctl_grace", None)
         if prev:
             prev.cancel()
         if active:
-            async def _resume():
+            try:
                 await self._use_proxy(sess)
                 await asyncio.to_thread(self._restore_view, sess["driver"], sess)
-            asyncio.run_coroutine_threadsafe(_resume(), loop)
+            except Exception as e:  # noqa: BLE001
+                log.warning("ctl view activation failed: %s", e)
         else:
             async def _later():
                 await asyncio.sleep(25)
                 if not sess.get("ctl_active"):
                     await self._use_direct(sess)
-            sess["_ctl_grace"] = asyncio.run_coroutine_threadsafe(_later(), loop)
+            sess["_ctl_grace"] = asyncio.create_task(_later())
 
     def _start_observer(self, session_id: str, sess: dict) -> None:
         from app.services.cdp_bridge import CdpBridge
