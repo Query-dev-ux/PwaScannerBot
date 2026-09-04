@@ -73,14 +73,29 @@ class LocalProxy:
                 await self._handler.wait_closed()
             except Exception:
                 pass
+            self._handler = None
+        last_err: Exception | None = None
         for attempt in range(5):
             try:
                 await self._bind()
-                break
-            except OSError:
+                log.info("local proxy %s swapped %s -> %s",
+                          self.url, _redact(old), _redact(new_upstream))
+                return
+            except OSError as e:
+                last_err = e
                 await asyncio.sleep(0.5)
-        log.info("local proxy %s swapped %s -> %s",
-                 self.url, _redact(old), _redact(new_upstream))
+        # every rebind attempt failed — the local port has NO listener now.
+        # Restore the old upstream so the browser isn't left completely
+        # disconnected, then tell the caller the swap itself didn't happen
+        # (previously this fell through silently and logged a fake success,
+        # leaving Chrome pointed at a dead local proxy with no error anywhere).
+        self.upstream = old
+        try:
+            await self._bind()
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"local proxy rebind to {_redact(new_upstream)} failed: {last_err}")
 
     async def stop(self) -> None:
         if not self._handler:
