@@ -2731,10 +2731,26 @@ class SessionManager:
                 # on this same Selenium driver (health-check re-subscribes,
                 # etc.) — two concurrent driver.get() calls can abort each
                 # other's in-flight connection, which looks exactly like a
-                # network error in the live view
-                async with sess["_drv_lock"]:
-                    await asyncio.to_thread(
-                        self._restore_view, sess["driver"], sess)
+                # network error in the live view. But a human is waiting on
+                # screen here, unlike the background jobs — don't make them
+                # stare at a black square for however long a resubscribe
+                # attempt takes; give up on the reload (not the swap) and
+                # just show whatever's already on screen if the driver
+                # stays busy too long.
+                try:
+                    await asyncio.wait_for(
+                        sess["_drv_lock"].acquire(), timeout=20)
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "session %s: driver busy (background job) — "
+                        "showing current page without a fresh reload",
+                        sess["id"][:8])
+                else:
+                    try:
+                        await asyncio.to_thread(
+                            self._restore_view, sess["driver"], sess)
+                    finally:
+                        sess["_drv_lock"].release()
             except Exception as e:  # noqa: BLE001
                 log.warning("ctl view activation failed: %s", e)
         else:
