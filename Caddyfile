@@ -13,5 +13,9 @@
 }
 
 {$DOMAIN} {
+	log {
+		output stdout
+		format console
+	}
 	reverse_proxy bot:{$WEBCONTROL_PORT}
 }
