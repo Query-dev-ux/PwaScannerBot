@@ -106,7 +106,7 @@ kbd.addEventListener('input',e=>{
 kbd.addEventListener('keydown',e=>{
  if(e.key==='Enter'){
   e.preventDefault();
-  ws&&ws.send(JSON.stringify({t:'key',type:'keyDown',key:'Enter',code:'Enter',keyCode:13,text:'\r'}));
+  ws&&ws.send(JSON.stringify({t:'key',type:'keyDown',key:'Enter',code:'Enter',keyCode:13,text:'\\r'}));
   ws&&ws.send(JSON.stringify({t:'key',type:'keyUp',key:'Enter',code:'Enter',keyCode:13}));
  }
 });
