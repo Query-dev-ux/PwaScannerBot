@@ -2725,32 +2725,45 @@ class SessionManager:
         if prev:
             prev.cancel()
         if active:
-            try:
+            async def _activate():
                 await self._use_proxy(sess, "live browser opened")
                 # serialize against any background job that's mid-navigation
                 # on this same Selenium driver (health-check re-subscribes,
                 # etc.) — two concurrent driver.get() calls can abort each
                 # other's in-flight connection, which looks exactly like a
-                # network error in the live view. But a human is waiting on
-                # screen here, unlike the background jobs — don't make them
-                # stare at a black square for however long a resubscribe
-                # attempt takes; give up on the reload (not the swap) and
-                # just show whatever's already on screen if the driver
-                # stays busy too long.
-                try:
-                    await asyncio.wait_for(
-                        sess["_drv_lock"].acquire(), timeout=20)
-                except asyncio.TimeoutError:
-                    log.warning(
-                        "session %s: driver busy (background job) — "
-                        "showing current page without a fresh reload",
-                        sess["id"][:8])
-                else:
-                    try:
-                        await asyncio.to_thread(
-                            self._restore_view, sess["driver"], sess)
-                    finally:
-                        sess["_drv_lock"].release()
+                # network error in the live view.
+                async with sess["_drv_lock"]:
+                    await asyncio.to_thread(
+                        self._restore_view, sess["driver"], sess)
+            # A human is waiting on screen here — never let this hang
+            # indefinitely no matter what's slow underneath (a stuck proxy
+            # swap, a slow resubscribe holding the lock, ...). shield() so a
+            # timeout only stops US from waiting — the swap/rebind keeps
+            # running to completion in the background instead of being cut
+            # off mid-operation (which could leave the local proxy with no
+            # bound listener at all, worse than what we started with).
+            task = asyncio.ensure_future(_activate())
+            # keep a strong reference so it isn't GC'd if we stop waiting on
+            # it below (asyncio doesn't keep orphaned tasks alive for you)
+            sess["_activate_task"] = task
+
+            def _log_activate_result(t: asyncio.Task) -> None:
+                sess.pop("_activate_task", None)
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc:
+                    log.warning("session %s: background activation failed: %s",
+                                sess["id"][:8], exc)
+            task.add_done_callback(_log_activate_result)
+
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=30)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "session %s: live view activation still running after "
+                    "30s — streaming current page as-is, letting it finish "
+                    "in the background", sess["id"][:8])
             except Exception as e:  # noqa: BLE001
                 log.warning("ctl view activation failed: %s", e)
         else:
@@ -3188,6 +3201,12 @@ class SessionManager:
         if grace:
             try:
                 grace.cancel()
+            except Exception:
+                pass
+        activate = session_data.pop("_activate_task", None)
+        if activate:
+            try:
+                activate.cancel()
             except Exception:
                 pass
         if self.webcontrol and session_data.get("id"):
