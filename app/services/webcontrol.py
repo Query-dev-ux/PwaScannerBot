@@ -14,8 +14,8 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Session browser</title>
 <style>
  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
- html,body{margin:0;background:#111;height:100%;overflow:hidden;font:14px system-ui;overscroll-behavior:none}
- #wrap{display:flex;flex-direction:column;height:100%;
+ html,body{margin:0;background:#111;height:100%;height:100dvh;overflow:hidden;font:14px system-ui;overscroll-behavior:none}
+ #wrap{display:flex;flex-direction:column;height:100%;height:100dvh;
   padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
  #bar{display:flex;gap:6px;padding:8px;background:#1c1c1c;flex-wrap:wrap;flex:0 0 auto}
  #bar button{font:15px system-ui;min-width:44px;min-height:44px;padding:8px 12px;border:0;
