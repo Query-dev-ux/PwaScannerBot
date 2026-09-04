@@ -2675,17 +2675,34 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("swap to proxy failed: %s", e)
 
+    _ERR_PAGE_JS = (
+        "return !!document.querySelector('#main-frame-error, .error-code, "
+        "#error-information-popup-content')"
+    )
+
     def _restore_view(self, driver, sess: dict) -> None:
         """Bring back a real page before the user looks at the live browser.
-        Two things park the tab on something blank: `_park_session` (stage ==
-        deposit) points it at about:blank to free RAM, and the subscription
-        health-check points it at <origin>/robots.txt to avoid re-running the
-        funnel SPA. Either way the screencast would just show a blank/plain
-        page instead of the funnel."""
+        Three things leave the tab showing nothing useful: `_park_session`
+        (stage == deposit) points it at about:blank to free RAM, the
+        subscription health-check points it at <origin>/robots.txt to avoid
+        re-running the funnel SPA, and a past network failure (dead proxy,
+        stale tunnel, etc.) can leave Chrome's own net-error page rendered —
+        Chrome keeps the ATTEMPTED url in current_url for that case, so it
+        looks like a normal page unless we check the DOM for the error
+        template and reload."""
         try:
             cur = driver.current_url or ""
             parked = sess.pop("parked", False)
-            if parked or cur.startswith("about:") or cur.rstrip("/").endswith("/robots.txt"):
+            needs_reload = (
+                parked or cur.startswith("about:")
+                or cur.rstrip("/").endswith("/robots.txt")
+            )
+            if not needs_reload:
+                try:
+                    needs_reload = bool(driver.execute_script(self._ERR_PAGE_JS))
+                except Exception:
+                    pass
+            if needs_reload:
                 target = sess.get("deep_link") or sess.get("start_url")
                 if target:
                     driver.get(target)
