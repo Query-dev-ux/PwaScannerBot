@@ -4,12 +4,33 @@ services:
     image: pwascannerbot
     restart: unless-stopped
     env_file: .env
-    ports:
-      # live-browser web control — must match WEBCONTROL_PORT / PUBLIC_URL in .env
-      - "8080:8080"
+    # No host port published — Caddy is the only public entry point (see
+    # below) and reaches this over the internal compose network as
+    # bot:${WEBCONTROL_PORT}. Publishing 8080 directly again would let
+    # traffic bypass HTTPS, defeating the whole point of the Caddy proxy.
     volumes:
       - ./data:/app/data
       - ./proxies.json:/app/proxies.json:ro
     # Chrome is memory-hungry; one collecting session ≈ 0.7–1 GB.
     shm_size: "1gb"
     mem_limit: "3g"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - bot
+    environment:
+      - DOMAIN=${PUBLIC_DOMAIN}
+      - WEBCONTROL_PORT=${WEBCONTROL_PORT:-8080}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

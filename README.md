@@ -51,8 +51,9 @@ python bot.py
 | ключ | назначение |
 |---|---|
 | `BOT_TOKEN` | токен от @BotFather |
-| `PUBLIC_URL` | как обращаться к «живому браузеру» извне (`http://IP:8080`) |
-| `WEBCONTROL_HOST` / `WEBCONTROL_PORT` | адрес веб-сервера управления (`0.0.0.0` / `8080`) |
+| `PUBLIC_DOMAIN` | домен (A-запись на IP сервера) — Caddy получает под него HTTPS-сертификат |
+| `PUBLIC_URL` | как обращаться к «живому браузеру» извне (`https://<PUBLIC_DOMAIN>`) |
+| `WEBCONTROL_HOST` / `WEBCONTROL_PORT` | внутренний адрес веб-сервера управления (`0.0.0.0` / `8080`), наружу не публикуется — только через Caddy |
 | `HEADLESS` | `true` по умолчанию; `false` + xvfb на сервере, если казино палит headless |
 | `COLLECT_DAYS` | срок сбора пушей (7) |
 | `MAX_SESSIONS` | одновременных сессий (держать под RAM: ≈ `RAM_ГБ − 2`) |

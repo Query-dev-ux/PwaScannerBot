@@ -85,7 +85,10 @@ class WebControl:
 
     # ---- lifecycle
     async def start(self, host: str, port: int) -> None:
-        self._runner = web.AppRunner(self.app)
+        # behind Caddy every request's direct peer is the proxy container —
+        # show the real client IP (X-Forwarded-For) in the access log instead
+        access_log_format = '%{X-Forwarded-For}i %l %u %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"'
+        self._runner = web.AppRunner(self.app, access_log_format=access_log_format)
         await self._runner.setup()
         await web.TCPSite(self._runner, host, port).start()
         log.info("web control listening on %s:%s (public %s)", host, port, self.public_url)
@@ -129,9 +132,12 @@ class WebControl:
         try:
             await ws.prepare(request)
         except web.HTTPBadRequest as e:
+            # behind Caddy, request.remote is the proxy's own container IP —
+            # the real client is in X-Forwarded-For
+            remote = request.headers.get("X-Forwarded-For", request.remote)
             log.warning(
                 "ws handshake rejected for %s (%s): %s | headers: %s",
-                request.remote, request.headers.get("User-Agent", "?"),
+                remote, request.headers.get("User-Agent", "?"),
                 e.text, dict(request.headers),
             )
             raise
