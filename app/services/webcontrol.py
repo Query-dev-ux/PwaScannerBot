@@ -10,17 +10,22 @@ from aiohttp import WSMsgType, web
 log = logging.getLogger(__name__)
 
 _PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Session browser</title>
 <style>
- html,body{margin:0;background:#111;height:100%;overflow:hidden;font:13px system-ui}
- #wrap{display:flex;flex-direction:column;height:100%}
- #bar{display:flex;gap:6px;padding:6px;background:#1c1c1c;flex-wrap:wrap}
- #bar button,#bar input{font:13px system-ui;padding:6px 8px;border:0;border-radius:6px;background:#333;color:#eee}
- #bar input{flex:1;min-width:120px}
- #stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden}
+ *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+ html,body{margin:0;background:#111;height:100%;overflow:hidden;font:14px system-ui;overscroll-behavior:none}
+ #wrap{display:flex;flex-direction:column;height:100%;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+ #bar{display:flex;gap:6px;padding:8px;background:#1c1c1c;flex-wrap:wrap;flex:0 0 auto}
+ #bar button{font:15px system-ui;min-width:44px;min-height:44px;padding:8px 12px;border:0;
+  border-radius:8px;background:#333;color:#eee;-webkit-user-select:none;user-select:none}
+ #bar button:active{background:#444}
+ #bar input{font:15px system-ui;min-height:44px;padding:8px 10px;border:0;border-radius:8px;
+  background:#333;color:#eee;flex:1;min-width:100px}
+ #stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;min-height:0}
  #screen{max-width:100%;max-height:100%;touch-action:none;background:#000;cursor:crosshair}
- #st{color:#8c8;padding:2px 6px}
+ #st{color:#8c8;padding:2px 6px;align-self:center}
 </style></head><body><div id=wrap>
 <div id=bar>
  <button onclick="nav('back')">◀</button>

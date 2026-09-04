@@ -190,6 +190,13 @@ class CdpBridge:
             sid = params.get("sessionId")
             if sid in self._page_sessions:
                 self._page_sessions.remove(sid)
+                # the tab that just closed may have been the one we were
+                # screencasting (e.g. a background PWA-launch tab) — retarget
+                # to whatever page is left, or the stream just dies silently
+                with self._lock:
+                    active = self._frame_sink is not None
+                if active:
+                    self._start_screencast()
         elif method == "Page.screencastFrame":
             data = params.get("data")
             meta = params.get("metadata") or {}

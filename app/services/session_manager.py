@@ -2676,13 +2676,16 @@ class SessionManager:
             log.warning("swap to proxy failed: %s", e)
 
     def _restore_view(self, driver, sess: dict) -> None:
-        """The subscription health-check parks the tab on <origin>/robots.txt
-        to avoid re-running the funnel SPA. If the user opens the live
-        browser right after, they'd see that blank page — bring back the
-        actual funnel/deep-link page first."""
+        """Bring back a real page before the user looks at the live browser.
+        Two things park the tab on something blank: `_park_session` (stage ==
+        deposit) points it at about:blank to free RAM, and the subscription
+        health-check points it at <origin>/robots.txt to avoid re-running the
+        funnel SPA. Either way the screencast would just show a blank/plain
+        page instead of the funnel."""
         try:
             cur = driver.current_url or ""
-            if cur.rstrip("/").endswith("/robots.txt"):
+            parked = sess.pop("parked", False)
+            if parked or cur.startswith("about:") or cur.rstrip("/").endswith("/robots.txt"):
                 target = sess.get("deep_link") or sess.get("start_url")
                 if target:
                     driver.get(target)
