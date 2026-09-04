@@ -2675,6 +2675,20 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("swap to proxy failed: %s", e)
 
+    def _restore_view(self, driver, sess: dict) -> None:
+        """The subscription health-check parks the tab on <origin>/robots.txt
+        to avoid re-running the funnel SPA. If the user opens the live
+        browser right after, they'd see that blank page — bring back the
+        actual funnel/deep-link page first."""
+        try:
+            cur = driver.current_url or ""
+            if cur.rstrip("/").endswith("/robots.txt"):
+                target = sess.get("deep_link") or sess.get("start_url")
+                if target:
+                    driver.get(target)
+        except Exception as e:  # noqa: BLE001
+            log.warning("restore view failed: %s", e)
+
     def _on_ctl_view(self, sess: dict, active: bool) -> None:
         """Sync callback from the web-control WS: bring the proxy up while the
         live browser is open, drop it (after a grace period) when it closes."""
@@ -2686,7 +2700,10 @@ class SessionManager:
         if prev:
             prev.cancel()
         if active:
-            asyncio.run_coroutine_threadsafe(self._use_proxy(sess), loop)
+            async def _resume():
+                await self._use_proxy(sess)
+                await asyncio.to_thread(self._restore_view, sess["driver"], sess)
+            asyncio.run_coroutine_threadsafe(_resume(), loop)
         else:
             async def _later():
                 await asyncio.sleep(25)

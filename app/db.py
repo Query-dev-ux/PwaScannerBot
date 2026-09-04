@@ -100,6 +100,40 @@ class Database:
                 "AND p2.event='Push message received' "
                 "AND ABS(p2.ts - pushes.ts) < 12)"
             )
+            # one-off cleanup: the same push used to land as two rows when its
+            # "received" (with banner image) and "displayed" (text-only,
+            # ~1 min later) events fell outside the old ±1s dedup window
+            await db.execute(
+                "UPDATE pushes SET image = ("
+                "  SELECT p2.image FROM pushes p2"
+                "  WHERE p2.session_id = pushes.session_id"
+                "    AND p2.title = pushes.title AND p2.body = pushes.body"
+                "    AND p2.id <> pushes.id"
+                "    AND IFNULL(p2.image,'') <> '' AND ABS(p2.ts - pushes.ts) <= 180"
+                "  LIMIT 1"
+                ") WHERE IFNULL(pushes.image,'') = ''"
+                "  AND (IFNULL(pushes.title,'') <> '' OR IFNULL(pushes.body,'') <> '')"
+                "  AND EXISTS ("
+                "    SELECT 1 FROM pushes p2"
+                "    WHERE p2.session_id = pushes.session_id"
+                "      AND p2.title = pushes.title AND p2.body = pushes.body"
+                "      AND p2.id <> pushes.id"
+                "      AND IFNULL(p2.image,'') <> '' AND ABS(p2.ts - pushes.ts) <= 180"
+                "  )"
+            )
+            await db.execute(
+                "DELETE FROM pushes WHERE id IN ("
+                "  SELECT p1.id FROM pushes p1"
+                "  WHERE (IFNULL(p1.title,'') <> '' OR IFNULL(p1.body,'') <> '')"
+                "    AND EXISTS ("
+                "      SELECT 1 FROM pushes p2"
+                "      WHERE p2.session_id = p1.session_id"
+                "        AND p2.title = p1.title AND p2.body = p1.body"
+                "        AND p2.id < p1.id"
+                "        AND ABS(p2.ts - p1.ts) <= 180"
+                "    )"
+                ")"
+            )
             await db.commit()
 
     @asynccontextmanager
@@ -216,15 +250,16 @@ class Database:
     # ---------- pushes ----------
     async def add_push(self, session_id: str, rec: dict[str, Any]) -> bool:
         """Insert a push. Collapses the low-level `pushMessaging` event and the
-        `notifications` event for the same push (±1s) into one row, keeping the
-        one that actually has a title/body. Returns True if a row was written."""
+        `notifications` event for the same push (within a few minutes) into
+        one row, keeping the one that actually has a title/body. Returns True
+        if a row was written."""
         title, body = rec.get("title"), rec.get("body")
         has_content = bool((title or "").strip() or (body or "").strip())
         ts = float(rec["ts"])
         async with self._conn() as db:
             cur = await db.execute(
-                """SELECT id, title, body FROM pushes
-                   WHERE session_id=? AND ABS(ts - ?) <= 1
+                """SELECT id, title, body, image FROM pushes
+                   WHERE session_id=? AND ABS(ts - ?) <= 180
                    AND IFNULL(service,'') <> 'stage' ORDER BY id""",
                 (session_id, ts),
             )
@@ -232,6 +267,12 @@ class Database:
                 r_has = bool((r["title"] or "").strip() or (r["body"] or "").strip())
                 same = (r["title"] or "") == (title or "") and (r["body"] or "") == (body or "")
                 if same:
+                    if not r["image"] and rec.get("image"):
+                        await db.execute(
+                            "UPDATE pushes SET image=? WHERE id=?",
+                            (rec.get("image"), r["id"]),
+                        )
+                        await db.commit()
                     return False
                 if r_has and not has_content:
                     return False  # keep the richer existing row
