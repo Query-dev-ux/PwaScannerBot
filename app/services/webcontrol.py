@@ -39,8 +39,12 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
     shows a keyboard. Tapping the ⌨️ button focuses THIS instead — a real,
     on-screen (if invisible) input — which does trigger the keyboard; its
     keystrokes get relayed to the actual session. pointer-events:none so
-    it never itself intercepts a tap meant for the canvas underneath. */
- #kbd{position:absolute;left:0;bottom:0;width:1px;height:1px;padding:0;border:0;
+    it never itself intercepts a tap meant for the canvas underneath.
+    Pinned to the TOP of the viewport (fixed, not absolute, so it can't
+    inherit a shifting ancestor) — the keyboard covers the bottom, and a
+    focused element sitting under it makes the browser scroll/pan the
+    whole page to "reveal" it, even though it's invisible. */
+ #kbd{position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;margin:0;
   opacity:0;font-size:16px;pointer-events:none}
 </style></head><body><div id=wrap>
 <div id=bar>
@@ -48,7 +52,7 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
  <button onclick="nav('reload')">⟳</button>
  <input id=url placeholder="https://…" onkeydown="if(event.key==='Enter')go()">
  <button onclick="go()">GO</button>
- <button onclick="kbd.focus()" title="Показать клавиатуру">⌨️</button>
+ <button onclick="kbd.value=KBD_ANCHOR;kbd.focus()" title="Показать клавиатуру">⌨️</button>
  <span id=st>connecting…</span>
 </div>
 <div id=stage><canvas id=screen></canvas><div id=loading>Ожидание кадра…</div>
@@ -91,17 +95,22 @@ addEventListener('keydown',e=>{if(e.target.id==='url'||e.target.id==='kbd')retur
 addEventListener('keyup',e=>{if(e.target.id==='url'||e.target.id==='kbd')return;
  ws&&ws.send(JSON.stringify({t:'key',type:'keyUp',key:e.key,code:e.code,keyCode:e.keyCode}))});
 // mobile virtual keyboards often don't fire clean keydown/keyup (autocorrect,
-// predictive text, IME composition) — 'input' with e.data is what actually
-// carries the typed character reliably there; Enter/Backspace still need
-// real key events since they're not "inserted text".
-kbd.addEventListener('input',e=>{
- if(e.inputType==='deleteContentBackward'){
+// predictive text, IME composition) — comparing the value against a fixed
+// anchor character is what reliably captures what actually happened there.
+// (Clearing the field to '' after every keystroke, the first attempt, broke
+// backspace: hitting it on an already-empty field changes nothing, so no
+// 'input' event — and thus no signal — ever fires.) A shrunk value means
+// backspace (or more); a grown one means new text was inserted after it.
+const KBD_ANCHOR=' ';
+kbd.addEventListener('input',()=>{
+ const v=kbd.value;
+ if(v.length<=KBD_ANCHOR.length){
   ws&&ws.send(JSON.stringify({t:'key',type:'keyDown',key:'Backspace',code:'Backspace',keyCode:8}));
   ws&&ws.send(JSON.stringify({t:'key',type:'keyUp',key:'Backspace',code:'Backspace',keyCode:8}));
- }else if(e.data){
-  ws&&ws.send(JSON.stringify({t:'text',text:e.data}));
+ }else{
+  ws&&ws.send(JSON.stringify({t:'text',text:v.slice(KBD_ANCHOR.length)}));
  }
- kbd.value='';
+ kbd.value=KBD_ANCHOR;
 });
 kbd.addEventListener('keydown',e=>{
  if(e.key==='Enter'){
