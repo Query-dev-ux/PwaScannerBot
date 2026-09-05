@@ -82,11 +82,16 @@ function pt(e){
  const offX=r.left+(r.width-dispW)/2,offY=r.top+(r.height-dispH)/2;
  return{x:Math.round((e.clientX-offX)/scale),y:Math.round((e.clientY-offY)/scale)};
 }
-function sendMouse(type,e,btn){const p=pt(e);ws&&ws.send(JSON.stringify(
- {t:'mouse',type,x:p.x,y:p.y,button:btn||'left'}))}
-cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);sendMouse('mousePressed',e)});
-cv.addEventListener('pointerup',e=>sendMouse('mouseReleased',e));
-cv.addEventListener('pointermove',e=>{if(e.buttons)sendMouse('mouseMoved',e)});
+// the remote page is emulated as a touch device throughout (mobile
+// fingerprint) — sending it synthetic MOUSE press/move/release for a swipe
+// just drags, it never scrolls, since mobile pages scroll on touch gestures,
+// not mouse movement. Real touch events let the remote Chrome's own gesture
+// recognition sort tap-vs-scroll natively, same as an actual phone.
+function sendTouch(type,e){const p=pt(e);ws&&ws.send(JSON.stringify({t:'touch',type,x:p.x,y:p.y}))}
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);sendTouch('touchStart',e)});
+cv.addEventListener('pointerup',e=>sendTouch('touchEnd',e));
+cv.addEventListener('pointercancel',e=>sendTouch('touchEnd',e));
+cv.addEventListener('pointermove',e=>{if(e.buttons)sendTouch('touchMove',e)});
 cv.addEventListener('wheel',e=>{e.preventDefault();const p=pt(e);
  ws&&ws.send(JSON.stringify({t:'wheel',x:p.x,y:p.y,dx:e.deltaX,dy:e.deltaY}))},{passive:false});
 addEventListener('keydown',e=>{if(e.target.id==='url'||e.target.id==='kbd')return;e.preventDefault();
@@ -249,18 +254,24 @@ async def _pump(ws: web.WebSocketResponse, q: asyncio.Queue) -> None:
             await ws.send_json(frame)
 
 
-_MOUSE = {"mousePressed", "mouseReleased", "mouseMoved"}
+_TOUCH = {"touchStart", "touchMove", "touchEnd"}
 
 
 def _dispatch(bridge, m: dict) -> None:
     t = m.get("t")
-    if t == "mouse" and m.get("type") in _MOUSE:
-        p = {"type": m["type"], "x": m["x"], "y": m["y"]}
-        if m["type"] != "mouseMoved":
-            p.update(button=m.get("button", "left"), clickCount=1)
-        else:
-            p["button"] = "none"
-        bridge.send_input([{"method": "Input.dispatchMouseEvent", "params": p}])
+    if t == "touch" and m.get("type") in _TOUCH:
+        ev_type = m["type"]
+        # CDP requires touchEnd/touchCancel to carry NO touch points, and
+        # touchStart/touchMove to carry at least one with an id (single-touch
+        # only here — no multi-finger gestures to track individually, so a
+        # constant id is fine)
+        touch_points = (
+            [] if ev_type == "touchEnd" else [{"x": m["x"], "y": m["y"], "id": 0}]
+        )
+        bridge.send_input([{
+            "method": "Input.dispatchTouchEvent",
+            "params": {"type": ev_type, "touchPoints": touch_points},
+        }])
     elif t == "wheel":
         bridge.send_input([{
             "method": "Input.dispatchMouseEvent",
