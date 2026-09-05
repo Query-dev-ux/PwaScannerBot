@@ -27,7 +27,13 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
     though pinch-zoom is no longer blocked, since that auto-zoom is still
     an unwanted jump on every tap. */
  #stage{flex:1;position:relative;overflow:hidden;min-height:0;background:#000}
- #screen{width:100%;height:100%;object-fit:contain;touch-action:none;cursor:crosshair}
+ /* full width always, height follows the canvas's own aspect ratio (set from
+    the screencast's real w/h) instead of being fit inside #stage — avoids
+    the black side-bars object-fit:contain left whenever the phone's screen
+    ratio isn't an exact match for the emulated device; any excess height
+    is simply clipped by #stage's overflow:hidden rather than shrinking the
+    whole picture down to letterbox it. */
+ #screen{display:block;width:100%;height:auto;touch-action:none;cursor:crosshair}
  #loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   color:#8c8;font:14px system-ui;pointer-events:none}
  #loading::before{content:'';width:22px;height:22px;margin-right:10px;border-radius:50%;
@@ -72,15 +78,12 @@ function connect(){
   else if(m.t==='info'){st.textContent=m.s}};
 }
 function pt(e){
- // canvas element now fills #stage (object-fit:contain draws the actual
- // frame letterboxed inside it) — map through the letterboxed content box,
- // not the element's full bounding box, or clicks near the edges land on
- // the wrong pixel (or in the empty margin) once the aspect ratios differ.
+ // canvas is always full-width with height following its own aspect ratio
+ // (see #screen CSS) — no letterboxing, so a single width-based scale maps
+ // both axes (the element's rendered aspect ratio always matches fw:fh).
  const r=cv.getBoundingClientRect();
- const scale=Math.min(r.width/fw,r.height/fh);
- const dispW=fw*scale,dispH=fh*scale;
- const offX=r.left+(r.width-dispW)/2,offY=r.top+(r.height-dispH)/2;
- return{x:Math.round((e.clientX-offX)/scale),y:Math.round((e.clientY-offY)/scale)};
+ const scale=r.width/fw;
+ return{x:Math.round((e.clientX-r.left)/scale),y:Math.round((e.clientY-r.top)/scale)};
 }
 function sendMouse(type,e,btn){const p=pt(e);ws&&ws.send(JSON.stringify(
  {t:'mouse',type,x:p.x,y:p.y,button:btn||'left'}))}
