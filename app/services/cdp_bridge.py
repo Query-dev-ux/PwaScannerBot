@@ -72,7 +72,7 @@ class CdpBridge:
         self._send("Page.enable", {}, sid)
         self._send(
             "Page.startScreencast",
-            {"format": "jpeg", "quality": 55, "maxWidth": 820, "maxHeight": 1700,
+            {"format": "jpeg", "quality": 85, "maxWidth": 820, "maxHeight": 1700,
              "everyNthFrame": 1},
             sid,
         )
