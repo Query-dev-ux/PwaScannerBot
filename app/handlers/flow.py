@@ -251,15 +251,18 @@ async def download_pack(cb: CallbackQuery, manager: SessionManager, db: Database
 
 
 @router.callback_query(F.data.startswith("pstop:"))
-async def stop_and_deliver(cb: CallbackQuery, manager: SessionManager, db: Database):
+async def stop_collecting(cb: CallbackQuery, manager: SessionManager, db: Database):
     session_id = cb.data.split(":", 1)[1]
     if not await db.get_session(session_id):
         await cb.answer("Сессия не найдена", show_alert=True)
         return
-    await cb.answer("Останавливаю и собираю архив…")
+    await cb.answer("Останавливаю…")
     try:
-        await manager.deliver(session_id)
-        await cb.message.answer("⏹ Сбор остановлен, архив отправлен, браузер закрыт")
+        await manager.stop_collecting(session_id)
+        await cb.message.answer(
+            "⏹ Сбор остановлен, браузер закрыт. Собранное никуда не делось — "
+            "заберите кнопкой «📦 Скачать архив» выше"
+        )
     except Exception as e:  # noqa: BLE001
         await cb.message.answer(f"Ошибка: <code>{esc(str(e))}</code>")
 

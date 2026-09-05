@@ -3205,6 +3205,18 @@ class SessionManager:
         )
         await self._teardown_session(self._sessions.pop(session_id, None))
 
+    async def stop_collecting(self, session_id: str) -> None:
+        """Stop collection and close the browser WITHOUT sending an archive —
+        collected pushes stay in the DB, exactly as export_pack (📦 Скачать
+        архив) already reads them, so the user can grab them any time
+        afterward instead of getting one pushed at them automatically."""
+        row = await self.db.get_session(session_id)
+        if not row or row["status"] == "delivered":
+            return
+        await self.flush_pushes()  # don't drop whatever's still queued in memory
+        await self._teardown_session(self._sessions.pop(session_id, None))
+        await self.db.set_session_fields(session_id, status="cancelled")
+
     async def cancel(self, session_id: str) -> None:
         """Cancel a session (also works for scanned-but-not-persisted sessions)."""
         await self._teardown_session(self._sessions.pop(session_id, None))
