@@ -2664,27 +2664,36 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("swap to direct failed: %s", e)
 
-    async def _use_proxy(self, sess: dict, why: str = "") -> None:
+    async def _use_proxy(self, sess: dict, why: str = "") -> bool:
         """Bring the scan proxy back up — needed to load the geo-gated
-        casino/funnel (live browser, re-subscribe health checks, ...)."""
+        casino/funnel (live browser, re-subscribe health checks, ...).
+        Returns True if it actually swapped (vs. already being on proxy) —
+        callers that are about to show the page to a human use this to force
+        a fresh reload: whatever's currently rendered was loaded under the
+        OLD network path (e.g. direct — geo-gated sites will happily render
+        a real "not available in your region" page for that, no error to
+        detect), and attaching the proxy doesn't retroactively fix content
+        that's already on screen."""
         lp = sess.get("local_proxy")
         up = sess.get("scan_upstream")
         if not lp or not up or sess.get("net") == "proxy":
-            return
+            return False
         try:
             await lp.swap(up)
             sess["net"] = "proxy"
             log.info("session %s -> proxy%s", sess["id"][:8],
                       f" ({why})" if why else "")
+            return True
         except Exception as e:  # noqa: BLE001
             log.warning("swap to proxy failed: %s", e)
+            return False
 
     _ERR_PAGE_JS = (
         "return !!document.querySelector('#main-frame-error, .error-code, "
         "#error-information-popup-content')"
     )
 
-    def _restore_view(self, driver, sess: dict) -> None:
+    def _restore_view(self, driver, sess: dict, force_reload: bool = False) -> None:
         """Bring back a real page before the user looks at the live browser.
         Three things leave the tab showing nothing useful: `_park_session`
         (stage == deposit) points it at about:blank to free RAM, the
@@ -2693,12 +2702,17 @@ class SessionManager:
         stale tunnel, etc.) can leave Chrome's own net-error page rendered —
         Chrome keeps the ATTEMPTED url in current_url for that case, so it
         looks like a normal page unless we check the DOM for the error
-        template and reload."""
+        template and reload. force_reload covers a fourth, sneakier case: the
+        proxy just got attached (see _use_proxy) but whatever's on screen was
+        rendered under the OLD network path — a geo-gated site renders a
+        real, successful "not available in your region" page for that, which
+        looks completely normal to the checks above and needs a fresh
+        navigation to actually reflect the new proxy, not just a DOM check."""
         try:
             cur = driver.current_url or ""
             parked = sess.pop("parked", False)
             needs_reload = (
-                parked or cur.startswith("about:")
+                force_reload or parked or cur.startswith("about:")
                 or cur.rstrip("/").endswith("/robots.txt")
             )
             if not needs_reload:
@@ -2727,7 +2741,7 @@ class SessionManager:
             prev.cancel()
         if active:
             async def _activate():
-                await self._use_proxy(sess, "live browser opened")
+                swapped = await self._use_proxy(sess, "live browser opened")
                 # serialize against any background job that's mid-navigation
                 # on this same Selenium driver (health-check re-subscribes,
                 # etc.) — two concurrent driver.get() calls can abort each
@@ -2735,7 +2749,7 @@ class SessionManager:
                 # network error in the live view.
                 async with sess["_drv_lock"]:
                     await asyncio.to_thread(
-                        self._restore_view, sess["driver"], sess)
+                        self._restore_view, sess["driver"], sess, swapped)
             # A human is waiting on screen here — never let this hang
             # indefinitely no matter what's slow underneath (a stuck proxy
             # swap, a slow resubscribe holding the lock, ...). shield() so a
