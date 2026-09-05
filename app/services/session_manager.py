@@ -2893,14 +2893,6 @@ class SessionManager:
                         self._subscription_alive, sess["driver"], origin)
                     alive = st.get("alive")
                     log.info("post-push sub check %s: alive=%s", sid[:8], alive)
-                    msg = ("✅ Пуш получен, подписка жива"
-                           if alive else
-                           "⚠️ Пуш получен, но Chrome отозвал подписку — "
-                           "переподписываюсь")
-                    try:
-                        await self.bot.send_message(sess["chat_id"], msg)
-                    except Exception:
-                        pass
                     if not alive:
                         # re-subscribe needs the geo
                         await self._use_proxy(sess, "post-push resubscribe")
