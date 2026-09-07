@@ -1474,6 +1474,18 @@ class SessionManager:
         except Exception:
             pass
 
+        # Explicitly register the endpoint with the funnel's own backend — the
+        # funnel's in-page code (ma('pushSubscription', …) → POST /api/event)
+        # often doesn't finish before its redirect, so a live local subscription
+        # never gets pushes. No-op for other push stacks.
+        if not shell:
+            reg = self._funnel_register_push(
+                driver, origin_of(start_url), "scan")
+            if str(reg.get("posted") or "").startswith("2"):
+                push_subscribed = True
+                push_endpoint = reg.get("endpoint") or push_endpoint
+                push_by = "funnel"
+
         # Screenshot
         screenshot: str | None = None
         try:
@@ -1648,6 +1660,140 @@ class SessionManager:
                 log.info("vapp subscribe: %s", r.get("err"))
         except Exception as e:  # noqa: BLE001
             log.warning("vapp subscribe failed: %s", e)
+        return out
+
+    _FUNNEL_REGISTER_JS = r"""
+    const cb = arguments[arguments.length - 1];
+    const b64u = (s) => {
+      s = String(s).replace(/-/g, '+').replace(/_/g, '/');
+      s += '='.repeat((4 - s.length % 4) % 4);
+      const b = atob(s), u = new Uint8Array(b.length);
+      for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+      return u;
+    };
+    (async () => {
+      try {
+        const cfg = window.appDataConfigs || {};
+        if (!cfg.pushServerKey && !cfg.piuid)
+          return cb({skip: 'no appDataConfigs (different push stack)'});
+        if (!('serviceWorker' in navigator) || !('PushManager' in window))
+          return cb({err: 'no push API'});
+        try {
+          if (Notification.permission !== 'granted')
+            await Notification.requestPermission();
+        } catch (e) {}
+        let reg = null;
+        for (let i = 0; i < 20; i++) {
+          reg = await navigator.serviceWorker.getRegistration();
+          if (reg && reg.active) break;
+          await new Promise(r => setTimeout(r, 700));
+        }
+        if (!reg) { try { reg = await navigator.serviceWorker.ready; } catch (e) {} }
+        if (!reg) return cb({err: 'no SW registration'});
+        let sub = await reg.pushManager.getSubscription();
+        if (!sub) {
+          if (!cfg.pushServerKey) return cb({err: 'no subscription, no key'});
+          try {
+            sub = await reg.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: b64u(cfg.pushServerKey),
+            });
+          } catch (e) { return cb({err: 'subscribe: ' + e}); }
+        }
+        // Mirror the funnel's own ma('pushSubscription', sub.toJSON()) call:
+        //   POST /api/event?event=pushSubscription&piuid=..&hdata=..
+        //   body = subscription JSON (+ contentEncoding + event)
+        const body = sub.toJSON();
+        try {
+          body.contentEncoding =
+            (PushManager.supportedContentEncodings || ['aesgcm'])[0];
+        } catch (e) {}
+        body.event = 'pushSubscription';
+        const qs = new URLSearchParams({event: 'pushSubscription'});
+        if (cfg.piuid) qs.set('piuid', cfg.piuid);
+        if (cfg.hdata) qs.set('hdata', cfg.hdata);
+        try {
+          const res = await fetch('/api/event?' + qs.toString(), {
+            method: 'POST', credentials: 'include', keepalive: true,
+            headers: {Accept: 'application/json',
+                      'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+          });
+          let resp = '';
+          try { resp = (await res.text()).slice(0, 200); } catch (e) {}
+          cb({endpoint: sub.endpoint, posted: res.status, resp: resp});
+        } catch (e) {
+          cb({endpoint: sub.endpoint, err: 'POST: ' + e});
+        }
+      } catch (e) { cb({err: String(e)}); }
+    })();
+    """
+
+    def _funnel_register_push(self, driver, origin: str, why: str = "") -> dict:
+        """Register the push subscription with the FUNNEL'S OWN backend, exactly
+        as its React app does via `ma('pushSubscription', sub)` →
+        POST <origin>/api/event?event=pushSubscription.
+
+        The PushExpress-native / tracker funnel family (window.appDataConfigs
+        with pushServerKey, no <meta va_app_public_key>) delivers pushes ONLY to
+        endpoints POSTed there. The in-page registration frequently doesn't
+        finish inside our short standalone-launch window, leaving a live local
+        subscription the backend never learned about → zero pushes. Doing it
+        ourselves closes that gap; it's idempotent (backend keys on piuid), and
+        a no-op for other push stacks (returns {skip: ...})."""
+        out = {"endpoint": None, "posted": None}
+        try:
+            cur = ""
+            try:
+                cur = driver.current_url or ""
+            except Exception:
+                pass
+            # window.appDataConfigs lives in the funnel SPA's inline <head>
+            # script — robots.txt / about:blank won't have it.
+            if (origin_of(cur) != origin
+                    or cur.startswith("about:")
+                    or cur.rstrip("/").endswith("/robots.txt")):
+                try:
+                    driver.execute_cdp_cmd(
+                        "Page.addScriptToEvaluateOnNewDocument",
+                        {"source": self._FREEZE_JS})
+                except Exception:
+                    pass
+                driver.get(origin + "/")
+                time.sleep(3)
+                try:
+                    driver.execute_script(self._FREEZE_JS)
+                except Exception:
+                    pass
+            try:
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {"origin": origin, "permissions": ["notifications"]})
+            except Exception:
+                pass
+            driver.set_script_timeout(45)
+            r = driver.execute_async_script(self._FUNNEL_REGISTER_JS) or {}
+            driver.set_script_timeout(20)
+            if r.get("skip"):
+                log.info("funnel register%s: skip (%s)",
+                         f" ({why})" if why else "", r["skip"])
+                return out
+            out["endpoint"] = r.get("endpoint")
+            out["posted"] = r.get("posted")
+            ok = str(r.get("posted") or "").startswith("2")
+            log.info(
+                "funnel register%s: posted=%s ok=%s ep=%s%s",
+                f" ({why})" if why else "", r.get("posted"), ok,
+                (r.get("endpoint") or "").split("/")[2]
+                if r.get("endpoint") else None,
+                f" err={r.get('err')}" if r.get("err") else "")
+        except Exception as e:  # noqa: BLE001
+            log.warning("funnel register failed: %s", e)
+        finally:
+            try:
+                driver.set_script_timeout(20)
+            except Exception:
+                pass
         return out
 
     def _subscribe_on_intermediate(self, driver, funnel_start: str,
@@ -3019,7 +3165,12 @@ class SessionManager:
                 async with sess["_drv_lock"]:
                     st = await asyncio.to_thread(
                         self._subscription_alive, sess["driver"], origin)
-                    if not st.get("alive"):
+                    alive = st.get("alive")
+                    # re-assert the endpoint with the funnel backend on a slow
+                    # cadence even when it's alive — covers backend-side expiry
+                    # and campaign-key churn that a local aliveness check misses
+                    reg_due = now - sess.get("_funnel_reg_at", 0) > 10800
+                    if not alive:
                         log.warning("session %s subscription gone — re-subscribing",
                                     sid[:8])
                         await self._use_proxy(sess, "18-min health check resubscribe")
@@ -3030,8 +3181,29 @@ class SessionManager:
                             await self.db.set_session_fields(
                                 sid, push_subscribed=1, push_endpoint=va["endpoint"])
                             log.info("session %s re-subscribed", sid[:8])
+                        else:
+                            fr = await asyncio.to_thread(
+                                self._funnel_register_push, sess["driver"],
+                                origin, "health check")
+                            if fr.get("endpoint"):
+                                sess["push_endpoint"] = fr["endpoint"]
+                                await self.db.set_session_fields(
+                                    sid, push_subscribed=1,
+                                    push_endpoint=fr["endpoint"])
+                        sess["_funnel_reg_at"] = now
                         if not sess.get("ctl_active"):
                             await self._use_direct(sess, "health check resubscribe done")
+                    elif reg_due:
+                        # needs the funnel origin to load uncloaked, so proxy
+                        await self._use_proxy(sess, "re-assert push endpoint")
+                        fr = await asyncio.to_thread(
+                            self._funnel_register_push, sess["driver"],
+                            origin, "periodic re-assert")
+                        if fr.get("endpoint"):
+                            sess["push_endpoint"] = fr["endpoint"]
+                        sess["_funnel_reg_at"] = now
+                        if not sess.get("ctl_active"):
+                            await self._use_direct(sess, "re-assert done")
 
             if sess.get("stage") != STAGE_INSTALL:
                 continue
