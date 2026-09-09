@@ -74,6 +74,11 @@ class Database:
                 )
             if "push_endpoint" not in scols:
                 await db.execute("ALTER TABLE sessions ADD COLUMN push_endpoint TEXT")
+            if "funnel_meta" not in scols:
+                # JSON: {piuid, piuidHash, hdata, pushServerKey} captured on the
+                # scan so re-registration reuses ONE stable piuid instead of a
+                # fresh throwaway the funnel mints on every page load
+                await db.execute("ALTER TABLE sessions ADD COLUMN funnel_meta TEXT")
             cur = await db.execute("PRAGMA table_info(authorized)")
             acols = {r[1] for r in await cur.fetchall()}
             if "level" not in acols:
@@ -151,13 +156,13 @@ class Database:
             await db.execute(
                 """INSERT INTO sessions
                 (id,user_id,chat_id,proxy,site_url,pwa_name,start_url,scope,deep_link,stage,
-                 push_subscribed,push_endpoint,
+                 push_subscribed,push_endpoint,funnel_meta,
                  profile_dir,status,created_at,expires_at,delivered_at)
                 VALUES (:id,:user_id,:chat_id,:proxy,:site_url,:pwa_name,:start_url,:scope,:deep_link,:stage,
-                        :push_subscribed,:push_endpoint,
+                        :push_subscribed,:push_endpoint,:funnel_meta,
                         :profile_dir,:status,:created_at,:expires_at,:delivered_at)""",
                 {"deep_link": None, "stage": None, "push_subscribed": 0,
-                 "push_endpoint": None, **d},
+                 "push_endpoint": None, "funnel_meta": None, **d},
             )
             await db.commit()
 
