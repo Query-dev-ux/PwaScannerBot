@@ -53,7 +53,7 @@ async def _begin_scan(
     await state.set_state(Flow.choosing_proxy)
     await state.update_data(proxies=proxies, mode=mode)
     prompt = {
-        "link": "Прокси для поиска оффер-линка:",
+        "link": "Прокси для пробития клоаки:",
         "probe": "Прокси для диагностики:",
         "js": "Прокси для выгрузки JS:",
     }.get(mode, "Прокси для сбора push:")
