@@ -1701,27 +1701,30 @@ class SessionManager:
           } catch (e) { return cb({err: 'subscribe: ' + e}); }
         }
         // Mirror the funnel's own ma('pushSubscription', sub.toJSON()) call:
-        //   POST /api/event?event=pushSubscription&piuid=..&hdata=..
-        //   body = subscription JSON (+ contentEncoding + event)
+        //   RequestApi("event", {event}, body) -> POST /api/event?event=pushSubscription
+        //   body = subscription JSON + {event, piuid, hdata} (piuid/hdata go
+        //   in the BODY, not the query — that's how the backend links the
+        //   endpoint to the click/user).
         const body = sub.toJSON();
         try {
           body.contentEncoding =
             (PushManager.supportedContentEncodings || ['aesgcm'])[0];
         } catch (e) {}
         body.event = 'pushSubscription';
-        const qs = new URLSearchParams({event: 'pushSubscription'});
-        if (cfg.piuid) qs.set('piuid', cfg.piuid);
-        if (cfg.hdata) qs.set('hdata', cfg.hdata);
+        if (cfg.piuid) body.piuid = cfg.piuid;
+        if (cfg.piuidHash) body.piuidHash = cfg.piuidHash;
+        if (cfg.hdata) body.hdata = cfg.hdata;
         try {
-          const res = await fetch('/api/event?' + qs.toString(), {
+          const res = await fetch('/api/event?event=pushSubscription', {
             method: 'POST', credentials: 'include', keepalive: true,
             headers: {Accept: 'application/json',
                       'Content-Type': 'application/json'},
             body: JSON.stringify(body),
           });
           let resp = '';
-          try { resp = (await res.text()).slice(0, 200); } catch (e) {}
-          cb({endpoint: sub.endpoint, posted: res.status, resp: resp});
+          try { resp = (await res.text()).slice(0, 300); } catch (e) {}
+          cb({endpoint: sub.endpoint, posted: res.status, resp: resp,
+              piuid: cfg.piuid || null});
         } catch (e) {
           cb({endpoint: sub.endpoint, err: 'POST: ' + e});
         }
@@ -1782,10 +1785,12 @@ class SessionManager:
             out["posted"] = r.get("posted")
             ok = str(r.get("posted") or "").startswith("2")
             log.info(
-                "funnel register%s: posted=%s ok=%s ep=%s%s",
+                "funnel register%s: posted=%s ok=%s piuid=%s ep=%s resp=%r%s",
                 f" ({why})" if why else "", r.get("posted"), ok,
+                r.get("piuid"),
                 (r.get("endpoint") or "").split("/")[2]
                 if r.get("endpoint") else None,
+                (r.get("resp") or "")[:200],
                 f" err={r.get('err')}" if r.get("err") else "")
         except Exception as e:  # noqa: BLE001
             log.warning("funnel register failed: %s", e)
