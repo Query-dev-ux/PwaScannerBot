@@ -233,7 +233,27 @@ class SessionManager:
         # version, so it can't be done here at options time).
         chrome_options.add_argument("--window-size=393,852")
 
-        driver = uc.Chrome(options=chrome_options, version_main=None)
+        # Pinned Chrome + its exact-match chromedriver, both baked into the image
+        # from the same Chrome-for-Testing manifest (see Dockerfile). Passing
+        # both paths + version_main keeps uc from downloading a driver at
+        # runtime that might not match the installed Chrome.
+        chrome_bin = os.environ.get("CHROME_BIN")
+        driver_bin = os.environ.get("CHROMEDRIVER_BIN")
+        chrome_bin = chrome_bin if chrome_bin and os.path.exists(chrome_bin) else None
+        driver_bin = driver_bin if driver_bin and os.path.exists(driver_bin) else None
+        version_main = None
+        try:
+            with open("/opt/CHROME_VERSION") as fh:
+                version_main = int(fh.read().strip().split(".")[0])
+        except Exception:
+            version_main = None
+
+        driver = uc.Chrome(
+            options=chrome_options,
+            version_main=version_main,
+            browser_executable_path=chrome_bin,
+            driver_executable_path=driver_bin,
+        )
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(20)
         log.info(
