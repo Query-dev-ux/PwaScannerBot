@@ -228,11 +228,11 @@ async def view_pushes(cb: CallbackQuery, db: Database):
             t = esc(p["title"] or p["event"] or "—")
             b = esc((p["body"] or "").strip())
             img = _row_img(p)
-            line = f"• <b>{ts}</b> {t}"
+            line = f"• <b>{ts}</b>\n{t}"
             if b:
-                line += f"\n  {b}"
+                line += f"\n{b}"
             if img:
-                line += f'\n  <a href="{esc(img)}">🖼 картинка</a>'
+                line += f'\n<a href="{esc(img)}">🖼 картинка</a>'
             out.append(line + "\n")
     await cb.message.answer("\n".join(out)[:4000], disable_web_page_preview=True)
 
