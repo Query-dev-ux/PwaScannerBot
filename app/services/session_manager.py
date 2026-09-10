@@ -2388,7 +2388,8 @@ class SessionManager:
 
 
     def _launch_pwa(self, driver, start_url: str, link_only: bool = False,
-                    shot_path: str | None = None) -> dict:
+                    shot_path: str | None = None,
+                    spoof_standalone: bool = True) -> dict:
         """Open start_url in a fresh tab emulating a PWA launch. Follows the
         redirect chain to the in-app deep link AND (unless link_only) grabs the
         push subscription the funnel creates on that standalone launch.
@@ -2408,7 +2409,10 @@ class SessionManager:
             try:
                 # the new tab is a fresh target - re-inject the page hooks
                 # (VAPID capture + Notification.permission=granted live here too)
-                for src in (self._STEALTH_JS, self._STANDALONE_SPOOF_JS):
+                _srcs = [self._STEALTH_JS]
+                if spoof_standalone:
+                    _srcs.append(self._STANDALONE_SPOOF_JS)
+                for src in _srcs:
                     driver.execute_cdp_cmd(
                         "Page.addScriptToEvaluateOnNewDocument", {"source": src}
                     )
@@ -2523,6 +2527,19 @@ class SessionManager:
                 log.info("no redirect on PWA launch - deep link = start_url")
                 if link_only:
                     self._log_launch_state(driver, origin)
+                # Newer vapp variant (opalinestormcall.shop / Joker's Jewels):
+                # the pwa_ page bounces to the casino ONLY when it does NOT
+                # think it's already a running standalone app. Retry once with
+                # the standalone spoof off.
+                if link_only and spoof_standalone:
+                    log.info("retrying pwa launch without standalone spoof")
+                    retry = self._launch_pwa(
+                        driver, start_url, link_only=True,
+                        shot_path=shot_path, spoof_standalone=False)
+                    if retry.get("deep_link") and norm(
+                            retry["deep_link"]) != norm(start_url):
+                        shot_path = None  # inner already took the good shot
+                        return retry
 
             if not link_only:
                 try:
