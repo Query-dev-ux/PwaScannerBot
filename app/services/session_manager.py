@@ -2480,7 +2480,32 @@ class SessionManager:
                 try:
                     driver.get(origin + "/")
                     _grant()
-                    driver.set_script_timeout(30)
+                    # The funnel root is often a heavy white page ("Card
+                    # Associations" etc) that never registers the funnel's SW —
+                    # so register it OURSELVES (both known worker paths) and
+                    # wait for it to control. The pwa_ page needs an active
+                    # /PwaWorker.js to serve the real app + bounce to the offer.
+                    driver.set_script_timeout(40)
+                    try:
+                        driver.execute_async_script(r"""
+                          const cb = arguments[arguments.length - 1];
+                          (async () => {
+                            for (const p of ['/PwaWorker.js',
+                                             '/push/vapp/VappWorker.js']) {
+                              try {
+                                const r = await navigator.serviceWorker
+                                  .register(p, {scope: '/'});
+                                for (let i = 0; i < 40 && !r.active; i++)
+                                  await new Promise(x => setTimeout(x, 500));
+                                if (r.active) return cb(p);
+                              } catch (e) {}
+                            }
+                            try { await navigator.serviceWorker.ready; } catch (e) {}
+                            cb(null);
+                          })();
+                        """)
+                    except Exception:
+                        pass
                     try:
                         driver.execute_async_script(self._WAIT_SW_JS)
                     except Exception:
