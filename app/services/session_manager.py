@@ -636,6 +636,11 @@ class SessionManager:
             has_mani = bool(re.search(
                 r'rel=["\']?[^"\'>]*manifest', r.text or "", re.I))
             cookies = ",".join(c.name for c in r.cookies) or "—"
+            txt = r.text or ""
+            pd = re.search(r"window\.pageData\s*=\s*(\{.*?\})\s*</script>",
+                           txt, re.S)
+            store = bool(re.search(r"play\.google\.com/store|App Market|"
+                                   r"apps\.apple\.com", txt))
             return (
                 "HTTP:\n" + lines_extra +
                 f"  final: {r.status_code} → {esc(r.url)}\n"
@@ -643,9 +648,11 @@ class SessionManager:
                 f"cf-ray={esc(h.get('cf-ray','—'))} "
                 f"cf-mitigated={esc(h.get('cf-mitigated','—'))}\n"
                 f"  content-type={esc(h.get('content-type','—'))} "
-                f"len={len(r.text or '')} manifest={has_mani}\n"
+                f"len={len(txt)} manifest={has_mani} storeLinks={store}\n"
                 f"  set-cookie={esc(cookies)}\n"
-                f"  title-tag={esc((m.group(1).strip() if m else '')[:80])}"
+                f"  title-tag={esc((m.group(1).strip() if m else '')[:80])}\n"
+                f"  pageData={esc((pd.group(1) if pd else '—')[:600])}\n"
+                f"  body[:1500]={esc(re.sub(r'<script[^>]*>.*?</script>', '', txt, flags=re.S)[:1500])}"
             )
 
         try:
