@@ -201,6 +201,17 @@ class SessionManager:
             chrome_options.add_argument("--headless=new")
             chrome_options.add_argument("--disable-gpu")
 
+        # WebGL must WORK. There's no GPU under Xvfb and Chrome (>=M110) no
+        # longer falls back to SwiftShader for WebGL on its own, so a cloaker's
+        # "is this a real Android device" probe sees getContext('webgl')===null
+        # — an instant bot flag. Force the ANGLE/SwiftShader path; _STEALTH_JS
+        # then rewrites the UNMASKED vendor/renderer to a mobile GPU.
+        chrome_options.add_argument("--use-gl=angle")
+        chrome_options.add_argument("--use-angle=swiftshader")
+        chrome_options.add_argument("--enable-unsafe-swiftshader")
+        chrome_options.add_argument("--ignore-gpu-blocklist")
+        chrome_options.add_argument("--enable-webgl")
+
         chrome_options.page_load_strategy = "eager"
 
         if proxy_url:
@@ -785,6 +796,12 @@ class SessionManager:
                             "proxy for this offer.",
                             geo.get("ip"), geo.get("isp"),
                         )
+                    if not geo.get("country_code"):
+                        raise RuntimeError(
+                            "гео-проба вернула только IP без страны (все "
+                            "провайдеры не ответили) — фингерпринт был бы "
+                            "en-US/UTC и клоака точно завернёт. Повтори скан"
+                        )
                 else:
                     raise RuntimeError(
                         "браузер/прокси не выходит в интернет "
@@ -955,47 +972,78 @@ class SessionManager:
         """Fetch the proxy's exit IP + geo via the local HTTP forwarder.
 
         Runs before the browser launches so UA / language / timezone can be set
-        correctly on the very first request. None => proxy has no connectivity.
+        correctly on the very first request. A wrong (or missing) country here
+        means an en-US / UTC fingerprint on a LatAm offer → guaranteed cloak,
+        so try several providers with retries before giving up.
+        None => proxy has no connectivity; {"ip": ...} only => geo unknown.
         """
         import requests
 
         proxies = {"http": proxy_url, "https": proxy_url}
-        try:
+
+        def _ip_api() -> dict | None:
             r = requests.get(
                 "http://ip-api.com/json/?fields=status,message,country,"
                 "countryCode,region,city,timezone,lat,lon,query,isp,"
                 "mobile,proxy,hosting",
-                proxies=proxies,
-                timeout=25,
+                proxies=proxies, timeout=20,
             )
-            data = r.json()
-            if data.get("status") == "success":
-                return {
-                    "ip": data.get("query"),
-                    "country_code": (data.get("countryCode") or "").upper(),
-                    "country": data.get("country"),
-                    "city": data.get("city"),
-                    "timezone": data.get("timezone"),
-                    "lat": data.get("lat"),
-                    "lon": data.get("lon"),
-                    "isp": data.get("isp"),
-                    "mobile": bool(data.get("mobile")),
-                    "proxy": bool(data.get("proxy")),
-                    "hosting": bool(data.get("hosting")),
-                }
-        except Exception as e:  # noqa: BLE001
-            log.warning("geo probe (ip-api) failed: %s", e)
+            d = r.json()
+            if d.get("status") != "success":
+                return None
+            return {
+                "ip": d.get("query"),
+                "country_code": (d.get("countryCode") or "").upper(),
+                "country": d.get("country"), "city": d.get("city"),
+                "timezone": d.get("timezone"),
+                "lat": d.get("lat"), "lon": d.get("lon"), "isp": d.get("isp"),
+                "mobile": bool(d.get("mobile")), "proxy": bool(d.get("proxy")),
+                "hosting": bool(d.get("hosting")),
+            }
 
-        # Fallback: just confirm the tunnel carries traffic at all.
+        def _ipwho() -> dict | None:
+            r = requests.get("https://ipwho.is/", proxies=proxies, timeout=20)
+            d = r.json()
+            if not d.get("success"):
+                return None
+            sec = d.get("security") or {}
+            conn = d.get("connection") or {}
+            return {
+                "ip": d.get("ip"),
+                "country_code": (d.get("country_code") or "").upper(),
+                "country": d.get("country"), "city": d.get("city"),
+                "timezone": (d.get("timezone") or {}).get("id"),
+                "lat": d.get("latitude"), "lon": d.get("longitude"),
+                "isp": conn.get("isp") or conn.get("org"),
+                "mobile": bool(sec.get("mobile")),
+                "proxy": bool(sec.get("proxy") or sec.get("vpn")),
+                "hosting": bool(sec.get("hosting")),
+            }
+
+        for attempt in range(3):
+            for name, fn in (("ip-api", _ip_api), ("ipwho.is", _ipwho)):
+                try:
+                    g = fn()
+                    if g and g.get("country_code"):
+                        return g
+                except Exception as e:  # noqa: BLE001
+                    log.warning("geo probe (%s) attempt %d failed: %s",
+                                name, attempt + 1, e)
+            time.sleep(2)
+
+        # Last resort: confirm the tunnel carries traffic at all (no geo).
         try:
             r = requests.get(
                 "https://api.ipify.org/?format=json", proxies=proxies, timeout=20
             )
             ip = r.json().get("ip")
-            return {"ip": ip} if ip else None
+            if ip:
+                log.warning("geo probe: only got IP %s, NO country/tz — "
+                            "fingerprint will be generic", ip)
+                return {"ip": ip}
         except Exception as e:  # noqa: BLE001
             log.warning("geo probe (ipify) failed: %s", e)
-            return None
+        return None
 
     _FP_JS = r"""
     // compact observable-fingerprint dump for comparing our uc-chrome against
