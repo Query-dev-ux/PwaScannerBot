@@ -2470,6 +2470,18 @@ class SessionManager:
                 except Exception as e:  # noqa: BLE001
                     log.warning("funnel-sub check failed: %s", e)
 
+            # Warm the funnel root first (without the standalone spoof): its JS
+            # sets the cloaker's pass cookie (cf-ew-wai) + registers the SW, and
+            # only THEN does the pwa_ page serve real content / bounce to the
+            # offer. Loading pwa_ cold gets a data-less stub.
+            if not spoof_standalone and origin_of(start_url):
+                try:
+                    driver.get(origin + "/")
+                    _grant()
+                    time.sleep(5)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("root warm-up failed: %s", e)
+
             try:
                 driver.get(start_url)
             except TimeoutException:
