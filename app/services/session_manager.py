@@ -2471,14 +2471,38 @@ class SessionManager:
                     log.warning("funnel-sub check failed: %s", e)
 
             # Warm the funnel root first (without the standalone spoof): its JS
-            # sets the cloaker's pass cookie (cf-ew-wai) + registers the SW, and
-            # only THEN does the pwa_ page serve real content / bounce to the
-            # offer. Loading pwa_ cold gets a data-less stub.
+            # sets the cloaker's pass cookie (cf-ew-wai) and registers the SW
+            # (/PwaWorker.js). The pwa_ page is SW-controlled — it renders the
+            # real app + bounces to the offer only once that SW is ACTIVE, so a
+            # cold first load gets a data-less stub. Load root, wait for the SW,
+            # then hit pwa_ (twice if needed — first nav often isn't controlled).
             if not spoof_standalone and origin_of(start_url):
                 try:
                     driver.get(origin + "/")
                     _grant()
-                    time.sleep(5)
+                    driver.set_script_timeout(30)
+                    try:
+                        driver.execute_async_script(self._WAIT_SW_JS)
+                    except Exception:
+                        pass
+                    driver.set_script_timeout(12)
+                    time.sleep(2)
+                    for _ in range(2):
+                        try:
+                            driver.get(start_url)
+                        except TimeoutException:
+                            pass
+                        _grant()
+                        time.sleep(6)
+                        try:
+                            cur2 = driver.current_url or ""
+                            blen = driver.execute_script(
+                                "return (document.body?"
+                                "document.body.innerHTML:'').length") or 0
+                        except Exception:
+                            cur2, blen = "", 0
+                        if norm(cur2) != norm(start_url) or blen > 2000:
+                            break
                 except Exception as e:  # noqa: BLE001
                     log.warning("root warm-up failed: %s", e)
 
