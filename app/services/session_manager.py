@@ -593,19 +593,46 @@ class SessionManager:
         def _http_probe(proxy_url: str | None) -> str:
             import requests
             px = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            # full Android-Chrome header set — if the bare request 400s but this
+            # passes, CF is filtering on headers; if BOTH 400, it's TLS (JA3) or
+            # a WAF rule and the fix is elsewhere.
+            hdrs = {
+                "User-Agent": self._mobile_ua("153"),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                          "image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+                "sec-ch-ua": '"Not(A:Brand";v="24", "Chromium";v="153", '
+                             '"Google Chrome";v="153"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+                "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            }
+            out = []
+            for tag, kw in (("bare", {}), ("chrome-hdrs", {"headers": hdrs})):
+                try:
+                    rr = requests.get(url, proxies=px, timeout=25,
+                                      allow_redirects=True, **kw)
+                    out.append(f"  {tag}: {rr.status_code} len={len(rr.text or '')}"
+                               f" cf-ray={esc(rr.headers.get('cf-ray','—'))}")
+                except Exception as e:  # noqa: BLE001
+                    out.append(f"  {tag}: ошибка {e}")
             try:
                 r = requests.get(url, proxies=px, timeout=30,
-                                 allow_redirects=True)
+                                 allow_redirects=True, headers=hdrs)
             except Exception as e:  # noqa: BLE001
-                return f"HTTP: ошибка {e}"
+                return "HTTP:\n" + "\n".join(out) + f"\n  ошибка {e}"
             h = r.headers
+            lines_extra = "\n".join(out) + "\n"
             m = re.search(r"<title[^>]*>(.*?)</title>", r.text or "",
                           re.I | re.S)
             has_mani = bool(re.search(
                 r'rel=["\']?[^"\'>]*manifest', r.text or "", re.I))
             cookies = ",".join(c.name for c in r.cookies) or "—"
             return (
-                f"HTTP: {r.status_code} → {esc(r.url)}\n"
+                "HTTP:\n" + lines_extra +
+                f"  final: {r.status_code} → {esc(r.url)}\n"
                 f"  server={esc(h.get('server','—'))} "
                 f"cf-ray={esc(h.get('cf-ray','—'))} "
                 f"cf-mitigated={esc(h.get('cf-mitigated','—'))}\n"
@@ -680,10 +707,28 @@ class SessionManager:
                             lines.append(f"  fingerprint: {esc(str(e))}")
                     mani, murl = self._read_manifest(driver, budget_ms=7000)
                     blocked = self._looks_blocked(title, body)
+                    # what did the browser ACTUALLY get? status of the main doc
+                    # + a slice of the raw HTML — tells apart CF 400 / empty 200
+                    # / chrome-error / a real white page.
+                    doc = {}
+                    try:
+                        doc = driver.execute_script(r"""
+                          const e = performance.getEntriesByType('navigation')[0] || {};
+                          const h = document.documentElement;
+                          return {code: e.responseStatus || null,
+                                  type: e.type || null,
+                                  xfer: e.transferSize || 0,
+                                  html: (h ? h.outerHTML : '').slice(0, 400),
+                                  err: location.href.startsWith('chrome-error')};
+                        """) or {}
+                    except Exception:
+                        pass
                     lines.append(
-                        f"  [{attempt}] url={esc(cur)}\n"
+                        f"  [{attempt}] url={esc(cur)} http={doc.get('code')}"
+                        f" xfer={doc.get('xfer')} chromeErr={doc.get('err')}\n"
                         f"      title={esc(title[:70])} bodyLen={len(body)} "
                         f"blocked={blocked}\n"
+                        f"      html={esc((doc.get('html') or '')[:300])}\n"
                         f"      manifest={'да' if mani else 'нет'}"
                         f" murl={esc(str(murl))}"
                         + (f"\n      name={esc(str(mani.get('name')))} "
