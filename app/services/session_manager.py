@@ -670,6 +670,18 @@ class SessionManager:
 
             def work() -> None:
                 self._apply_stealth(driver, geo)
+                try:
+                    driver.execute_cdp_cmd(
+                        "Page.addScriptToEvaluateOnNewDocument",
+                        {"source":
+                         "window.__err=[];"
+                         "addEventListener('error',e=>{try{__err.push("
+                         "(e.message||'')+' @ '+(e.filename||'')+':'+e.lineno)}"
+                         "catch(x){}});"
+                         "addEventListener('unhandledrejection',e=>{try{"
+                         "__err.push('promise: '+e.reason)}catch(x){}});"})
+                except Exception:
+                    pass
                 lines.append("\n<b>Браузер</b> (до 3 загрузок):")
                 for attempt in range(1, 4):
                     if attempt > 1:
@@ -682,7 +694,7 @@ class SessionManager:
                         driver.get(url)
                     except TimeoutException:
                         pass
-                    time.sleep(3)
+                    time.sleep(6)
                     cur = title = body = ""
                     try:
                         cur = driver.current_url or ""
@@ -714,21 +726,32 @@ class SessionManager:
                     try:
                         doc = driver.execute_script(r"""
                           const e = performance.getEntriesByType('navigation')[0] || {};
-                          const h = document.documentElement;
+                          const scr = [...document.scripts].map(s =>
+                            s.src || ('(inline ' + (s.textContent||'').length + ')'));
+                          const bodyHTML = (document.body?document.body.innerHTML:'');
                           return {code: e.responseStatus || null,
-                                  type: e.type || null,
                                   xfer: e.transferSize || 0,
-                                  html: (h ? h.outerHTML : '').slice(0, 400),
-                                  err: location.href.startsWith('chrome-error')};
+                                  ready: document.readyState,
+                                  err: location.href.startsWith('chrome-error'),
+                                  jsErr: (window.__err||[]).slice(0,6),
+                                  scripts: scr.slice(0, 20),
+                                  headHTML: (document.head?document.head.outerHTML:'')
+                                            .slice(0, 1200),
+                                  bodyLen: bodyHTML.length,
+                                  bodyHTML: bodyHTML.slice(0, 800)};
                         """) or {}
-                    except Exception:
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        doc = {"dumpErr": str(e)}
                     lines.append(
                         f"  [{attempt}] url={esc(cur)} http={doc.get('code')}"
-                        f" xfer={doc.get('xfer')} chromeErr={doc.get('err')}\n"
-                        f"      title={esc(title[:70])} bodyLen={len(body)} "
-                        f"blocked={blocked}\n"
-                        f"      html={esc((doc.get('html') or '')[:300])}\n"
+                        f" xfer={doc.get('xfer')} ready={doc.get('ready')}"
+                        f" chromeErr={doc.get('err')}\n"
+                        f"      title={esc(title[:70])} bodyText={len(body)}"
+                        f" bodyHTML={doc.get('bodyLen')} blocked={blocked}\n"
+                        f"      jsErr={esc(str(doc.get('jsErr')))}\n"
+                        f"      scripts={esc(str(doc.get('scripts')))}\n"
+                        f"      head={esc(str(doc.get('headHTML') or '')[:900])}\n"
+                        f"      body={esc(str(doc.get('bodyHTML') or '')[:500])}\n"
                         f"      manifest={'да' if mani else 'нет'}"
                         f" murl={esc(str(murl))}"
                         + (f"\n      name={esc(str(mani.get('name')))} "
@@ -750,6 +773,40 @@ class SessionManager:
                             f"  deep_link={esc(launch['deep_link'])}\n"
                             f"  {'✅ редирект пойман (скриншот — страница deep-link)' if launch['deep_link'] != start_url else '⚠️ редиректа нет — deep_link = start_url'}"
                         )
+                        if launch["deep_link"] == start_url:
+                            # dump the pwa_ page itself — why didn't it bounce?
+                            try:
+                                driver.get(start_url)
+                                time.sleep(6)
+                                pd = driver.execute_script(r"""
+                                  const q = s => (document.querySelector(
+                                    'meta[name="'+s+'"]')||{}).content || null;
+                                  return {
+                                    title: document.title,
+                                    ready: document.readyState,
+                                    bodyLen: (document.body?
+                                      document.body.innerHTML:'').length,
+                                    body: (document.body?
+                                      document.body.innerHTML:'').slice(0, 600),
+                                    jsErr: (window.__err||[]).slice(0, 6),
+                                    scripts: [...document.scripts].map(
+                                      s => s.src || ('(inline '
+                                      + (s.textContent||'').length + ')')
+                                    ).slice(0, 20),
+                                    va_key: q('va_app_public_key'),
+                                    va_id: q('va_app_id'),
+                                    standalone: matchMedia(
+                                      '(display-mode: standalone)').matches,
+                                    swCtrl: !!(navigator.serviceWorker &&
+                                      navigator.serviceWorker.controller),
+                                    href: location.href,
+                                  };
+                                """) or {}
+                                lines.append(
+                                    "  <b>pwa_ страница</b>: " + esc(
+                                        json.dumps(pd, ensure_ascii=False)[:1400]))
+                            except Exception as e:  # noqa: BLE001
+                                lines.append(f"  pwa_ dump: {esc(str(e))}")
                         return
                 lines.append("\n⚠️ Ни одна загрузка не дала воронку с manifest — "
                              "клоака отдаёт заглушку")
