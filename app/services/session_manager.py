@@ -659,6 +659,14 @@ class SessionManager:
                             "return document.body?document.body.innerText:''") or ""
                     except Exception:
                         pass
+                    if attempt == 1:
+                        try:
+                            driver.set_script_timeout(15)
+                            fp = driver.execute_async_script(self._FP_JS) or {}
+                            lines.append("  <b>fingerprint</b>: " + esc(
+                                json.dumps(fp, ensure_ascii=False)[:1600]))
+                        except Exception as e:  # noqa: BLE001
+                            lines.append(f"  fingerprint: {esc(str(e))}")
                     mani, murl = self._read_manifest(driver, budget_ms=7000)
                     blocked = self._looks_blocked(title, body)
                     lines.append(
@@ -988,6 +996,75 @@ class SessionManager:
         except Exception as e:  # noqa: BLE001
             log.warning("geo probe (ipify) failed: %s", e)
             return None
+
+    _FP_JS = r"""
+    // compact observable-fingerprint dump for comparing our uc-chrome against
+    // a browser that DOES pass a given cloaker (e.g. an antidetect profile)
+    const cb = arguments[arguments.length - 1];
+    try {
+      const n = navigator, s = screen, out = {};
+      out.ua = n.userAgent;
+      out.platform = n.platform;
+      out.webdriver = n.webdriver;
+      out.lang = n.language; out.langs = (n.languages || []).join(',');
+      out.vendor = n.vendor;
+      out.cores = n.hardwareConcurrency;
+      out.mem = n.deviceMemory;
+      out.touch = n.maxTouchPoints;
+      out.pdf = n.pdfViewerEnabled;
+      out.plugins = (n.plugins || []).length;
+      out.dpr = window.devicePixelRatio;
+      out.screen = [s.width, s.height, s.availWidth, s.availHeight,
+                    s.colorDepth].join('x');
+      out.orient = (s.orientation || {}).type + '/' + (s.orientation || {}).angle;
+      out.win = [window.innerWidth, window.innerHeight,
+                 window.outerWidth, window.outerHeight].join('x');
+      out.tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      out.standalone = matchMedia('(display-mode: standalone)').matches;
+      out.coarse = matchMedia('(pointer: coarse)').matches;
+      out.noHover = matchMedia('(hover: none)').matches;
+      out.chrome = !!window.chrome;
+      out.conn = n.connection ? (n.connection.effectiveType + '/' +
+                 n.connection.type) : null;
+      try {
+        const c = document.createElement('canvas');
+        const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        out.gl_vendor = gl && gl.getParameter(gl.VENDOR);
+        out.gl_renderer = gl && gl.getParameter(gl.RENDERER);
+        out.gl_uvendor = dbg && gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+        out.gl_urenderer = dbg && gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+        out.gl_maxtex = gl && gl.getParameter(gl.MAX_TEXTURE_SIZE);
+      } catch (e) { out.gl_err = String(e); }
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = 200; cv.height = 40;
+        const x = cv.getContext('2d');
+        x.textBaseline = 'top'; x.font = "14px 'Arial'";
+        x.fillStyle = '#f60'; x.fillRect(0, 0, 100, 20);
+        x.fillStyle = '#069'; x.fillText('Cwm fjord \u{1F600}', 2, 2);
+        const d = cv.toDataURL();
+        let h = 0; for (let i = 0; i < d.length; i++)
+          h = (h * 31 + d.charCodeAt(i)) | 0;
+        out.canvas_hash = h;
+      } catch (e) { out.canvas_err = String(e); }
+      if (n.userAgentData && n.userAgentData.getHighEntropyValues) {
+        n.userAgentData.getHighEntropyValues(
+          ['architecture', 'bitness', 'model', 'platformVersion',
+           'fullVersionList', 'uaFullVersion']).then(hev => {
+          out.uaData = {mobile: n.userAgentData.mobile,
+                        platform: n.userAgentData.platform,
+                        arch: hev.architecture, bitness: hev.bitness,
+                        model: hev.model, pv: hev.platformVersion,
+                        fvl: (hev.fullVersionList || [])
+                             .map(b => b.brand + ':' + b.version).join(' ')};
+          cb(out);
+        }).catch(() => cb(out));
+        return;
+      }
+      cb(out);
+    } catch (e) { cb({fp_error: String(e)}); }
+    """
 
     _STEALTH_JS = """
     (() => {
