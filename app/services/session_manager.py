@@ -758,6 +758,33 @@ class SessionManager:
                            f"start_url={esc(str(mani.get('start_url')))}"
                            if mani else "")
                     )
+                    # the browser navigation got a stub but `requests` got the
+                    # full funnel — ask the PAGE to re-fetch `/` itself (same
+                    # TLS/H2 as the browser) and see which it gets. Isolates
+                    # "navigation vs subresource request shape" from "the whole
+                    # browser stack is flagged".
+                    if attempt == 1:
+                        try:
+                            fr = driver.execute_async_script(r"""
+                              const cb = arguments[arguments.length - 1];
+                              fetch(location.origin + '/?_x=' + Date.now(), {
+                                cache: 'reload', credentials: 'include',
+                                headers: {'Accept':
+                                  'text/html,application/xhtml+xml,*/*;q=0.8'}
+                              }).then(async r => {
+                                const t = await r.text();
+                                cb({status: r.status, len: t.length,
+                                    hasRoot: t.includes('id="root"'),
+                                    hasPreland: t.includes('preland-'),
+                                    hasBundle: /src="[^"]*\.(js)"/.test(t),
+                                    head: t.slice(0, 500)});
+                              }).catch(e => cb({err: String(e)}));
+                            """) or {}
+                            lines.append("  <b>page fetch /</b>: " + esc(
+                                json.dumps(fr, ensure_ascii=False)[:900]))
+                        except Exception as e:  # noqa: BLE001
+                            lines.append(f"  page fetch: {esc(str(e))}")
+
                     if mani and not blocked:
                         base = cur if cur.startswith("http") else url
                         start_url = urljoin(
