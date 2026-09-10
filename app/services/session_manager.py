@@ -641,7 +641,36 @@ class SessionManager:
                            txt, re.S)
             store = bool(re.search(r"play\.google\.com/store|App Market|"
                                    r"apps\.apple\.com", txt))
-            return (
+
+            def _meta(name):
+                mm = re.search(
+                    r'<meta[^>]+name=["\']' + name + r'["\'][^>]+content=["\']'
+                    r'([^"\']*)', txt, re.I)
+                return mm.group(1) if mm else None
+            man = re.search(r'<link[^>]+rel=["\']manifest["\'][^>]+href=["\']'
+                            r'([^"\']+)', txt, re.I)
+            man_url = urljoin(r.url, man.group(1)) if man else None
+            sub_probe = []
+            for path in ("/PwaWorker.js", "/push/vapp/VappWorker.js",
+                         man.group(1) if man else None):
+                if not path:
+                    continue
+                try:
+                    pr = requests.get(urljoin(r.url, path), proxies=px,
+                                      timeout=15, headers=hdrs)
+                    sub_probe.append(
+                        f"    {path} -> {pr.status_code} "
+                        f"len={len(pr.text or '')} "
+                        f"ct={esc(pr.headers.get('content-type','')[:30])}")
+                except Exception as e:  # noqa: BLE001
+                    sub_probe.append(f"    {path} -> err {e}")
+            va = (f"  va_app_public_key={esc(str(_meta('va_app_public_key')))}\n"
+                  f"  va_app_id={esc(str(_meta('va_app_id')))} "
+                  f"user_id={esc(str(_meta('user_id')))}\n"
+                  f"  manifest_url={esc(str(man_url))}\n"
+                  f"  subresources (requests, chrome hdrs):\n"
+                  + "\n".join(sub_probe) + "\n")
+            return va + (
                 "HTTP:\n" + lines_extra +
                 f"  final: {r.status_code} → {esc(r.url)}\n"
                 f"  server={esc(h.get('server','—'))} "
