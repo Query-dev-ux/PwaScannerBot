@@ -201,6 +201,12 @@ class SessionManager:
             chrome_options.add_argument("--headless=new")
             chrome_options.add_argument("--disable-gpu")
 
+        # Some cloakers (opalinestormcall.shop) branch on the HTTP/2
+        # fingerprint: a plain HTTP/1.1 client (requests) gets the real funnel,
+        # a real Chrome over h2 gets an empty stub. Toggle to force h1 and test.
+        if os.environ.get("DISABLE_HTTP2") in ("1", "true", "yes"):
+            chrome_options.add_argument("--disable-http2")
+
         # WebGL must WORK. There's no GPU under Xvfb and Chrome (>=M110) no
         # longer falls back to SwiftShader for WebGL on its own, so a cloaker's
         # "is this a real Android device" probe sees getContext('webgl')===null
